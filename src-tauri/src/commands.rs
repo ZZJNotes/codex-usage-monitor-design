@@ -180,7 +180,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             result: Ok(QuotaSnapshot {
                 account: QuotaAccount {
-                    id: "account-1".to_string(),
+                    id: "account-1".into(),
                     display_name: "user@example.com".to_string(),
                     plan_type: "plus".to_string(),
                 },
@@ -208,7 +208,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             result: Ok(QuotaSnapshot {
                 account: QuotaAccount {
-                    id: "account-1".to_string(),
+                    id: "account-1".into(),
                     display_name: "user@example.com".to_string(),
                     plan_type: "plus".to_string(),
                 },

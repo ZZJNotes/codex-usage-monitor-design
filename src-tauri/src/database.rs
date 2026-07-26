@@ -159,7 +159,30 @@ impl PreferenceStore for Database {
 }
 
 impl QuotaStore for Database {
-    fn save(&self, snapshot: &QuotaSnapshot) -> Result<(), String> {
+    fn load(&self, account_id: &crate::quota::AccountId) -> Result<Option<QuotaSnapshot>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?;
+        let result = connection.query_row(
+            "SELECT snapshot_json FROM quota_snapshots WHERE account_key = ?1 ORDER BY observed_at_utc DESC LIMIT 1",
+            params![account_id.as_str()],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(value) => serde_json::from_str(&value)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn save(
+        &self,
+        account_id: &crate::quota::AccountId,
+        snapshot: &QuotaSnapshot,
+    ) -> Result<(), String> {
         let value = serde_json::to_string(snapshot).map_err(|error| error.to_string())?;
         self.connection
             .lock()
@@ -168,7 +191,7 @@ impl QuotaStore for Database {
                 "INSERT OR REPLACE INTO quota_snapshots (account_key, observed_at_utc, snapshot_json)
                  VALUES (?1, ?2, ?3)",
                 params![
-                    snapshot.account.display_name,
+                    account_id.as_str(),
                     snapshot.updated_at.to_rfc3339(),
                     value
                 ],
@@ -193,7 +216,7 @@ mod tests {
 
         PreferenceStore::save(&database, &preferences).unwrap();
 
-        assert_eq!(database.load().unwrap(), Some(preferences));
+        assert_eq!(PreferenceStore::load(&database).unwrap(), Some(preferences));
     }
 
     #[test]
@@ -201,7 +224,7 @@ mod tests {
         let database = Database::in_memory().unwrap();
         let snapshot = QuotaSnapshot {
             account: crate::quota::QuotaAccount {
-                id: "account-1".to_string(),
+                id: "account-1".into(),
                 display_name: "user@example.com".to_string(),
                 plan_type: "plus".to_string(),
             },
@@ -214,7 +237,8 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        QuotaStore::save(&database, &snapshot).unwrap();
+        let account_id = crate::quota::AccountId::from("account-1");
+        QuotaStore::save(&database, &account_id, &snapshot).unwrap();
 
         let stored = database
             .connection

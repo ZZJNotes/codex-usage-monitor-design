@@ -158,7 +158,7 @@ pub fn run() {
                     if !quota_lifecycle.preferences().monitoring_paused {
                         let now = Utc::now();
                         if (now - previous_tick).num_seconds() > 15 {
-                            quota_refresh.recover_due();
+                            quota_refresh.stagger_due_recoveries();
                         } else {
                             quota_refresh.refresh_due();
                         }

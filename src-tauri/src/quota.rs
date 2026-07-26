@@ -6,10 +6,32 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct AccountId(String);
+
+impl AccountId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for AccountId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for AccountId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaAccount {
-    pub id: String,
+    pub id: AccountId,
     pub display_name: String,
     pub plan_type: String,
 }
@@ -97,7 +119,8 @@ pub trait QuotaSource: Send + Sync {
 }
 
 pub trait QuotaStore: Send + Sync {
-    fn save(&self, snapshot: &QuotaSnapshot) -> Result<(), String>;
+    fn load(&self, account_id: &AccountId) -> Result<Option<QuotaSnapshot>, String>;
+    fn save(&self, account_id: &AccountId, snapshot: &QuotaSnapshot) -> Result<(), String>;
 }
 
 pub trait QuotaClock: Send + Sync {
@@ -152,7 +175,7 @@ enum RefreshTrigger {
 }
 
 pub struct QuotaService {
-    account_id: String,
+    account_id: AccountId,
     source: Arc<dyn QuotaSource>,
     store: Option<Arc<dyn QuotaStore>>,
     clock: Arc<dyn QuotaClock>,
@@ -163,7 +186,7 @@ pub struct QuotaService {
 }
 
 impl QuotaService {
-    pub fn new(account_id: impl Into<String>, source: Arc<dyn QuotaSource>) -> Self {
+    pub fn new(account_id: impl Into<AccountId>, source: Arc<dyn QuotaSource>) -> Self {
         Self::with_dependencies(
             account_id,
             source,
@@ -174,7 +197,7 @@ impl QuotaService {
     }
 
     pub fn with_store(
-        account_id: impl Into<String>,
+        account_id: impl Into<AccountId>,
         source: Arc<dyn QuotaSource>,
         store: Arc<dyn QuotaStore>,
     ) -> Self {
@@ -188,7 +211,7 @@ impl QuotaService {
     }
 
     fn with_dependencies(
-        account_id: impl Into<String>,
+        account_id: impl Into<AccountId>,
         source: Arc<dyn QuotaSource>,
         store: Option<Arc<dyn QuotaStore>>,
         clock: Arc<dyn QuotaClock>,
@@ -196,14 +219,28 @@ impl QuotaService {
     ) -> Self {
         let account_id = account_id.into();
         let now = clock.now();
-        let first_refresh_at = now + chrono_duration(account_jitter(&account_id, policy.jitter));
+        let first_refresh_at =
+            now + chrono_duration(account_jitter(account_id.as_str(), policy.jitter));
+        let state = match store.as_ref().map(|store| store.load(&account_id)) {
+            Some(Ok(Some(snapshot))) => QuotaState::Ready {
+                snapshot,
+                next_refresh_at: first_refresh_at,
+            },
+            Some(Err(_)) => QuotaState::Error {
+                reason: QuotaErrorReason::Storage,
+                last_snapshot: None,
+                failed_at: now,
+                retry_at: None,
+            },
+            _ => QuotaState::Loading,
+        };
         Self {
             account_id,
             source,
             store,
             clock,
             policy,
-            state: RwLock::new(QuotaState::Loading),
+            state: RwLock::new(state),
             schedule: Mutex::new(RefreshSchedule {
                 next_automatic_at: first_refresh_at,
                 manual_retry_at: None,
@@ -215,39 +252,39 @@ impl QuotaService {
         }
     }
 
-    pub fn unavailable(account_id: impl Into<String>, message: String) -> Self {
+    pub fn unavailable(account_id: impl Into<AccountId>, message: String) -> Self {
         let service = Self::new(
             account_id,
             Arc::new(UnavailableQuotaSource(message.clone())),
         );
         let now = service.clock.now();
-        *service.state.write().expect("quota state poisoned") = QuotaState::Error {
-            reason: QuotaErrorReason::Unavailable,
-            last_snapshot: None,
-            failed_at: now,
-            retry_at: None,
-        };
+        service.complete_failure(
+            now,
+            QuotaRefreshError::new(QuotaFailureKind::Service, message),
+        );
         service
     }
 
     pub fn unavailable_with_store(
-        account_id: impl Into<String>,
+        account_id: impl Into<AccountId>,
         message: String,
         store: Arc<dyn QuotaStore>,
     ) -> Self {
-        let service =
-            Self::with_store(account_id, Arc::new(UnavailableQuotaSource(message)), store);
+        let source_message = message.clone();
+        let service = Self::with_store(
+            account_id,
+            Arc::new(UnavailableQuotaSource(source_message)),
+            store,
+        );
         let now = service.clock.now();
-        *service.state.write().expect("quota state poisoned") = QuotaState::Error {
-            reason: QuotaErrorReason::Unavailable,
-            last_snapshot: None,
-            failed_at: now,
-            retry_at: None,
-        };
+        service.complete_failure(
+            now,
+            QuotaRefreshError::new(QuotaFailureKind::Service, message),
+        );
         service
     }
 
-    pub fn account_id(&self) -> &str {
+    pub fn account_id(&self) -> &AccountId {
         &self.account_id
     }
 
@@ -281,7 +318,7 @@ impl QuotaService {
         schedule.last_recovery_at = Some(now);
         schedule.next_automatic_at = now
             + chrono::Duration::seconds(1)
-            + chrono_duration(account_jitter(&self.account_id, self.policy.jitter));
+            + chrono_duration(account_jitter(self.account_id.as_str(), self.policy.jitter));
     }
 
     pub fn authorization_restored(&self) -> QuotaState {
@@ -354,7 +391,9 @@ impl QuotaService {
     }
 
     fn complete_success(&self, now: DateTime<Utc>, snapshot: QuotaSnapshot) -> QuotaState {
-        if self.account_id != CURRENT_CODEX_ACCOUNT_ID && snapshot.account.id != self.account_id {
+        if self.account_id.as_str() != CURRENT_CODEX_ACCOUNT_ID
+            && snapshot.account.id != self.account_id
+        {
             return self.complete_failure(
                 now,
                 QuotaRefreshError::new(
@@ -365,7 +404,7 @@ impl QuotaService {
         }
         let next_refresh_at = now
             + chrono_duration(self.policy.interval)
-            + chrono_duration(account_jitter(&self.account_id, self.policy.jitter));
+            + chrono_duration(account_jitter(self.account_id.as_str(), self.policy.jitter));
         {
             let mut schedule = self.schedule.lock().expect("quota schedule poisoned");
             schedule.consecutive_failures = 0;
@@ -373,7 +412,7 @@ impl QuotaService {
             schedule.next_automatic_at = next_refresh_at;
         }
         let state = if let Some(store) = &self.store
-            && store.save(&snapshot).is_err()
+            && store.save(&self.account_id, &snapshot).is_err()
         {
             QuotaState::Error {
                 reason: QuotaErrorReason::Storage,
@@ -463,7 +502,7 @@ impl QuotaRefreshCoordinator {
         }
     }
 
-    pub fn recover_due(&self) {
+    pub fn stagger_due_recoveries(&self) {
         for account in &self.accounts {
             account.stagger_recovery_if_due();
         }
@@ -569,7 +608,7 @@ mod tests {
     fn snapshot_for(account_id: &str, percent: u8) -> QuotaSnapshot {
         QuotaSnapshot {
             account: QuotaAccount {
-                id: account_id.to_string(),
+                id: account_id.into(),
                 display_name: "user@example.com".to_string(),
                 plan_type: "plus".to_string(),
             },
@@ -882,7 +921,7 @@ mod tests {
         let coordinator = QuotaRefreshCoordinator::new(vec![first, second]);
         clock.advance(Duration::from_secs(120));
 
-        coordinator.recover_due();
+        coordinator.stagger_due_recoveries();
         coordinator.refresh_due();
 
         assert_eq!(first_source.calls.load(Ordering::SeqCst), 0);
@@ -915,7 +954,7 @@ mod tests {
 
         let snapshot = normalize_responses(&account, &rate_limits, observed_at).unwrap();
 
-        assert_eq!(snapshot.account.id, "user@example.com");
+        assert_eq!(snapshot.account.id, AccountId::from("user@example.com"));
         assert_eq!(snapshot.account.display_name, "user@example.com");
         assert_eq!(snapshot.account.plan_type, "plus");
         assert_eq!(snapshot.windows.len(), 1);
@@ -990,10 +1029,43 @@ mod tests {
         assert!(matches!(
             unavailable.latest(),
             QuotaState::Error {
-                reason: QuotaErrorReason::Unavailable,
+                reason: QuotaErrorReason::Service,
                 last_snapshot: None,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn restored_snapshot_becomes_stale_when_the_first_refresh_after_restart_fails() {
+        let database = Arc::new(crate::database::Database::in_memory().unwrap());
+        let value = snapshot(67);
+        let initial = QuotaService::with_store(
+            "account-1",
+            Arc::new(StaticQuotaSource(value.clone())),
+            database.clone(),
+        );
+        initial.manual_refresh();
+        let failing_source = Arc::new(SequenceSource {
+            calls: AtomicUsize::new(0),
+            results: Mutex::new(VecDeque::from([Err(QuotaRefreshError::new(
+                QuotaFailureKind::Transport,
+                "offline after restart",
+            ))])),
+        });
+
+        let restored = QuotaService::with_store("account-1", failing_source, database);
+        assert!(
+            matches!(restored.latest(), QuotaState::Ready { ref snapshot, .. } if snapshot == &value)
+        );
+
+        assert!(matches!(
+            restored.manual_refresh(),
+            QuotaState::Stale {
+                reason: QuotaErrorReason::Transport,
+                ref snapshot,
+                ..
+            } if snapshot == &value
         ));
     }
 

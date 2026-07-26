@@ -127,8 +127,7 @@ impl CodexAppServerSource {
 impl QuotaSource for CodexAppServerSource {
     fn refresh(&self) -> Result<QuotaSnapshot, QuotaRefreshError> {
         let response = self.request().map_err(classify_app_server_error)?;
-        normalize_response(response, Utc::now())
-            .map_err(|message| QuotaRefreshError::new(QuotaFailureKind::InvalidResponse, message))
+        normalize_response(response, Utc::now()).map_err(classify_normalization_error)
     }
 }
 
@@ -190,6 +189,9 @@ fn normalize_response(
     else {
         return Err("The current Codex login is not a ChatGPT account".to_string());
     };
+    let account_id = email
+        .clone()
+        .unwrap_or_else(|| "chatgpt-account-without-email".to_string());
     let display_name = email.unwrap_or_else(|| "ChatGPT account".to_string());
     let mut buckets = response
         .rate_limits
@@ -255,13 +257,22 @@ fn normalize_response(
     }
     Ok(QuotaSnapshot {
         account: QuotaAccount {
-            id: display_name.clone(),
+            id: account_id.into(),
             display_name,
             plan_type,
         },
         windows,
         updated_at: observed_at,
     })
+}
+
+fn classify_normalization_error(message: String) -> QuotaRefreshError {
+    let kind = if message.contains("current Codex login is not a ChatGPT account") {
+        QuotaFailureKind::Authentication
+    } else {
+        QuotaFailureKind::InvalidResponse
+    };
+    QuotaRefreshError::new(kind, message)
 }
 
 fn classify_app_server_error(message: String) -> QuotaRefreshError {
@@ -376,4 +387,18 @@ fn resolve_codex_executable() -> Option<PathBuf> {
 
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_chatgpt_account_is_an_authentication_failure() {
+        let error = classify_normalization_error(
+            "The current Codex login is not a ChatGPT account".to_string(),
+        );
+
+        assert_eq!(error.kind, QuotaFailureKind::Authentication);
+    }
 }
