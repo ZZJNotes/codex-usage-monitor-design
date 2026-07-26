@@ -589,6 +589,25 @@ mod tests {
         }
     }
 
+    struct RepresentativeAccountEvidence;
+
+    impl AccountEvidenceSource for RepresentativeAccountEvidence {
+        fn active_account(&self) -> Option<ActiveAccountEvidence> {
+            Some(account(
+                "sanitized-account-a",
+                "Sanitized A",
+                "2026-07-20T10:00:00Z",
+            ))
+        }
+
+        fn known_accounts(&self) -> Vec<ActiveAccountEvidence> {
+            vec![
+                self.active_account().unwrap(),
+                account("sanitized-account-b", "Sanitized B", "2026-07-20T10:00:00Z"),
+            ]
+        }
+    }
+
     fn account(key: &str, name: &str, observed_at: &str) -> ActiveAccountEvidence {
         ActiveAccountEvidence {
             account: TokenAccount {
@@ -682,62 +701,112 @@ mod tests {
     }
 
     #[test]
-    fn common_history_queries_meet_the_release_target_on_ten_thousand_sanitized_events() {
+    fn common_history_queries_meet_the_release_target_on_representative_sanitized_history() {
         let directory = tempdir().unwrap();
         let active = directory.path().join("sessions");
         fs::create_dir_all(&active).unwrap();
         let mut fixture =
             BufWriter::new(fs::File::create(active.join("release-performance.jsonl")).unwrap());
-        writeln!(
-            fixture,
-            r#"{{"timestamp":"2026-07-20T10:00:00Z","type":"session_meta","payload":{{"id":"sanitized-performance-session"}}}}"#
-        )
-        .unwrap();
-        writeln!(
-            fixture,
-            r#"{{"timestamp":"2026-07-20T10:00:00Z","type":"turn_context","payload":{{"model":"gpt-5.6"}}}}"#
-        )
-        .unwrap();
-        for second in 0..10_000 {
+        for session in 0..100 {
             writeln!(
                 fixture,
-                r#"{{"timestamp":"2026-07-20T10:{:02}:{:02}Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":2,"cached_input_tokens":1,"output_tokens":1,"reasoning_output_tokens":1}}}}}}}}"#,
-                (second / 60) % 60,
-                second % 60,
+                r#"{{"timestamp":"2026-07-20T10:00:00Z","type":"session_meta","payload":{{"id":"sanitized-performance-session-{session:03}"}}}}"#
             )
             .unwrap();
+            writeln!(
+                fixture,
+                r#"{{"timestamp":"2026-07-20T10:00:00Z","type":"turn_context","payload":{{"model":"gpt-5.{}"}}}}"#,
+                4 + session % 4,
+            )
+            .unwrap();
+            for event in 0..100 {
+                let second = session * 100 + event;
+                writeln!(
+                    fixture,
+                    r#"{{"timestamp":"2026-07-20T10:{:02}:{:02}Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":2,"cached_input_tokens":1,"output_tokens":1,"reasoning_output_tokens":1}}}}}}}}"#,
+                    (second / 60) % 60,
+                    second % 60,
+                )
+                .unwrap();
+            }
         }
         fixture.flush().unwrap();
 
-        let service = TokenUsageService::new(Database::in_memory().unwrap(), vec![active]);
+        let service = TokenUsageService::with_account_evidence(
+            Database::open(&directory.path().join("release-performance.sqlite3")).unwrap(),
+            vec![active],
+            Arc::new(RepresentativeAccountEvidence),
+        );
         assert_eq!(service.scan().unwrap().imported_events, 10_000);
+        for session in 50..100 {
+            service
+                .reassign_session(
+                    &format!("sanitized-performance-session-{session:03}"),
+                    Some("sanitized-account-b"),
+                    "2026-07-20T12:00:00Z",
+                )
+                .unwrap();
+        }
 
-        let all_started = Instant::now();
-        let all = ready(service.query(TokenUsageFilters::default()));
-        let all_elapsed = all_started.elapsed();
-        let filtered_started = Instant::now();
-        let filtered = ready(service.query(TokenUsageFilters {
-            model: Some("gpt-5.6".to_string()),
-            session_id: Some("sanitized-performance-session".to_string()),
-            ..TokenUsageFilters::default()
-        }));
-        let filtered_elapsed = filtered_started.elapsed();
+        let cases = [
+            ("all", TokenUsageFilters::default(), 30_000),
+            (
+                "time",
+                TokenUsageFilters {
+                    start_at: Some("2026-07-20T10:30:00Z".to_string()),
+                    end_at: Some("2026-07-20T10:39:59Z".to_string()),
+                    ..TokenUsageFilters::default()
+                },
+                5_400,
+            ),
+            (
+                "model",
+                TokenUsageFilters {
+                    model: Some("gpt-5.6".to_string()),
+                    ..TokenUsageFilters::default()
+                },
+                7_500,
+            ),
+            (
+                "session",
+                TokenUsageFilters {
+                    session_id: Some("sanitized-performance-session-042".to_string()),
+                    ..TokenUsageFilters::default()
+                },
+                300,
+            ),
+            (
+                "account",
+                TokenUsageFilters {
+                    account_key: Some("sanitized-account-b".to_string()),
+                    ..TokenUsageFilters::default()
+                },
+                15_000,
+            ),
+        ];
 
-        assert_eq!(all.totals.total_tokens, 30_000);
-        assert_eq!(filtered.totals.total_tokens, 30_000);
-        println!(
-            "release query probe: events=10000 all_ms={} filtered_ms={}",
-            all_elapsed.as_millis(),
-            filtered_elapsed.as_millis()
-        );
-        assert!(
-            all_elapsed < Duration::from_millis(500),
-            "unfiltered history query took {all_elapsed:?}"
-        );
-        assert!(
-            filtered_elapsed < Duration::from_millis(500),
-            "filtered history query took {filtered_elapsed:?}"
-        );
+        for (name, filters, expected_total) in cases {
+            let mut samples = Vec::new();
+            for _ in 0..5 {
+                let started = Instant::now();
+                let data = ready(service.query(filters.clone()));
+                let elapsed = started.elapsed();
+                assert_eq!(data.totals.total_tokens, expected_total, "{name} total");
+                samples.push(elapsed);
+            }
+            samples.sort();
+            println!(
+                "release query probe: storage=disk events=10000 accounts=2 sessions=100 models=4 runs=5 query={name} min_ms={} median_ms={} max_ms={}",
+                samples[0].as_millis(),
+                samples[2].as_millis(),
+                samples[4].as_millis(),
+            );
+            assert!(
+                samples[4] < Duration::from_millis(500),
+                "{name} history query took {:?}",
+                samples[4]
+            );
+        }
     }
 
     #[test]

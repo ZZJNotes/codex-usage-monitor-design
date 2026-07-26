@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, params_from_iter, types::Value as SqlValue};
 
 use crate::database::Database;
@@ -181,9 +181,11 @@ pub(super) fn query_usage(
              FROM token_usage_events WHERE 1 = 1",
         );
         let mut values = Vec::<SqlValue>::new();
+        let start_at = normalized_time_filter(filters.start_at.as_deref(), "start")?;
+        let end_at = normalized_time_filter(filters.end_at.as_deref(), "end")?;
         for (column, value, operator) in [
-            ("observed_at_utc", filters.start_at.as_ref(), ">="),
-            ("observed_at_utc", filters.end_at.as_ref(), "<="),
+            ("observed_at_utc", start_at.as_ref(), ">="),
+            ("observed_at_utc", end_at.as_ref(), "<="),
             ("model", filters.model.as_ref(), "="),
             ("session_id", filters.session_id.as_ref(), "="),
         ] {
@@ -269,6 +271,21 @@ pub(super) fn query_usage(
             updated_at: updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
         })
     })
+}
+
+fn normalized_time_filter(value: Option<&str>, label: &str) -> Result<Option<String>, String> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|value| {
+                    value
+                        .with_timezone(&Utc)
+                        .to_rfc3339_opts(SecondsFormat::Millis, true)
+                })
+                .map_err(|_| format!("invalid {label} time filter"))
+        })
+        .transpose()
 }
 
 fn load_accounts(connection: &rusqlite::Connection) -> Result<Vec<TokenAccount>, String> {

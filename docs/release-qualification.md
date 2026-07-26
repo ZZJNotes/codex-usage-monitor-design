@@ -47,14 +47,17 @@ release binary 在临时 `CFFIXED_USER_HOME`/`HOME`、空 `CODEX_HOME` 下冷启
 
 ## 查询性能
 
-服务边界性能 probe 生成 10,000 条脱敏 Token 事件，导入到内存 SQLite 后通过真实 `TokenUsageService::query` 测量：
+服务边界性能 probe 生成 10,000 条脱敏 Token 事件，覆盖 2 个账户、100 个 session、4 个 model 和 60 分钟时间分布，导入临时磁盘 SQLite 后通过真实 `TokenUsageService::query` 测量。每种查询在同一目标 Mac 连续执行 5 次：
 
-| 查询 | 数据量 | 结果 | 目标 |
+| 查询 | 正确结果规模 | min / median / max | 目标 |
 | --- | ---: | ---: | ---: |
-| 全历史聚合 | 10,000 events / 1 session / 1 model | 22 ms | 约 500 ms |
-| model + session 筛选 | 10,000 events / 1 session / 1 model | 23 ms | 约 500 ms |
+| 全历史聚合 | 10,000 events | 25 / 26 / 27 ms | 约 500 ms |
+| 时间筛选 | 1,800 events | 4 / 4 / 4 ms | 约 500 ms |
+| model 筛选 | 2,500 events | 6 / 6 / 6 ms | 约 500 ms |
+| session 筛选 | 100 events | 0 / 0 / 0 ms | 约 500 ms |
+| account 筛选 | 5,000 events | 19 / 19 / 19 ms | 约 500 ms |
 
-测试 `common_history_queries_meet_the_release_target_on_ten_thousand_sanitized_events` 固化了数据量、正确总数和 500 ms 门槛。该结果覆盖常见查询，不代表极端多 session/model 基数。
+测试 `common_history_queries_meet_the_release_target_on_representative_sanitized_history` 固化了数据维度、每类正确总数、5 次采样和 500 ms 最大值门槛。测试同时验证 IPC 可接受的 RFC 3339 时间在 SQL 比较前规范为 UTC 毫秒精度，避免边界时间因字符串精度不同而漏计。该结果覆盖常见查询，不代表极端数据量或基数。
 
 ## 产物
 
@@ -65,7 +68,7 @@ src-tauri/target/release/bundle/macos/Codex Usage Monitor.app
 主可执行文件 SHA-256：
 
 ```text
-4c951e57cfeda154b6431edbda9042e539f2e44f3fb48c159e8152a707051b4b
+3f9c17fd5367b870ce485c086e2cd804d043739a0a7797d751de36a6982daa81
 ```
 
 构建产物未提交 Git；应从本提交在目标 Mac 重新执行 `npm ci && npm run tauri build`。Tauri 配置固定 `signingIdentity: "-"`，避免只签 Mach-O 而未签完整 bundle。
