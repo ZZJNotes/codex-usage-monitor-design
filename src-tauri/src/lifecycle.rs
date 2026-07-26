@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -75,14 +78,17 @@ pub trait PreferenceStore: Send + Sync {
 pub struct LifecycleService {
     store: Arc<dyn PreferenceStore>,
     preferences: RwLock<LifecyclePreferences>,
+    sampling_was_paused: AtomicBool,
 }
 
 impl LifecycleService {
     pub fn new(store: Arc<dyn PreferenceStore>) -> Result<Self, String> {
         let preferences = store.load()?.unwrap_or_default();
+        let sampling_was_paused = preferences.monitoring_paused;
         Ok(Self {
             store,
             preferences: RwLock::new(preferences),
+            sampling_was_paused: AtomicBool::new(sampling_was_paused),
         })
     }
 
@@ -94,7 +100,11 @@ impl LifecycleService {
     }
 
     pub fn set_monitoring_paused(&self, paused: bool) -> Result<LifecyclePreferences, String> {
-        self.update(|preferences| preferences.monitoring_paused = paused)
+        let preferences = self.update(|preferences| preferences.monitoring_paused = paused)?;
+        if paused {
+            self.sampling_was_paused.store(true, Ordering::Release);
+        }
+        Ok(preferences)
     }
 
     pub fn set_theme(&self, theme: &str) -> Result<LifecyclePreferences, String> {
@@ -126,6 +136,9 @@ impl LifecycleService {
         if self.preferences().monitoring_paused {
             Ok(None)
         } else {
+            if self.sampling_was_paused.swap(false, Ordering::AcqRel) {
+                health.reset_rate_baseline();
+            }
             health.sample().map(Some)
         }
     }
@@ -164,17 +177,19 @@ mod tests {
 
     impl MetricSource for CountingSource {
         fn collect(&self) -> Result<MetricSnapshot, String> {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            let sample_index = self.0.fetch_add(1, Ordering::SeqCst);
             Ok(MetricSnapshot {
-                observed_at: Utc.with_ymd_and_hms(2026, 7, 26, 10, 0, 0).unwrap(),
+                observed_at: Utc
+                    .with_ymd_and_hms(2026, 7, 26, 10, 0, sample_index as u32 * 2)
+                    .unwrap(),
                 cpu_percent: 1.0,
                 memory_used_bytes: 1,
                 memory_total_bytes: 2,
                 memory_pressure: MemoryPressureLevel::Normal,
                 disk_available_bytes: 1,
                 disk_total_bytes: 2,
-                network_received_bytes: 0,
-                network_transmitted_bytes: 0,
+                network_received_bytes: sample_index as u64 * 2_000,
+                network_transmitted_bytes: sample_index as u64 * 1_000,
                 battery_percent: None,
                 battery_charging: None,
                 uptime_seconds: 1,
@@ -192,7 +207,16 @@ mod tests {
         lifecycle.sample_if_active(&health).unwrap();
         lifecycle.set_monitoring_paused(true).unwrap();
         assert_eq!(lifecycle.sample_if_active(&health).unwrap(), None);
-        assert_eq!(source.0.load(Ordering::SeqCst), 1);
+        lifecycle.set_monitoring_paused(false).unwrap();
+        let resumed = lifecycle.sample_if_active(&health).unwrap().unwrap();
+        let SystemHealthState::Ready { metrics, .. } = resumed else {
+            panic!("expected ready state after resume");
+        };
+        assert_eq!(metrics.network_down_bytes_per_second, 0.0);
+        assert_eq!(metrics.network_up_bytes_per_second, 0.0);
+        assert_eq!(source.0.load(Ordering::SeqCst), 2);
+
+        lifecycle.set_monitoring_paused(true).unwrap();
 
         let restarted = LifecycleService::new(store).unwrap();
         assert!(restarted.preferences().monitoring_paused);

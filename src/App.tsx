@@ -18,6 +18,10 @@ const defaultPreferences: LifecyclePreferences = {
   launchAtLogin: false,
 };
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function formatBytes(value: number, locale: string, suffix = "") {
   if (!Number.isFinite(value) || value < 0) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -136,7 +140,7 @@ export function App() {
   const [preferences, setPreferences] = useState<LifecyclePreferences>(defaultPreferences);
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [history, setHistory] = useState<HealthPoint[]>([]);
-  const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>({ storageError: null });
+  const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>({ storageIssue: null });
   const [requestError, setRequestError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
@@ -144,14 +148,14 @@ export function App() {
     [preferences.locale],
   );
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     try {
-      setHealth(await monitorApi.getHealth());
+      setHealth(await (force ? monitorApi.refreshHealth() : monitorApi.getHealth()));
     } catch (error) {
       setHealth({
         status: "error",
         updatedAt: new Date().toISOString(),
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
         lastMetrics: null,
       });
     }
@@ -161,7 +165,7 @@ export function App() {
     try {
       setHistory(await monitorApi.getHealthHistory());
     } catch (error) {
-      setRequestError(error instanceof Error ? error.message : String(error));
+      setRequestError(errorMessage(error));
     }
   }, []);
 
@@ -174,7 +178,7 @@ export function App() {
       setPreferences(nextPreferences);
       setApplicationStatus(nextStatus);
     } catch (error) {
-      setRequestError(error instanceof Error ? error.message : String(error));
+      setRequestError(errorMessage(error));
     }
   }, []);
 
@@ -204,7 +208,7 @@ export function App() {
       setPreferences(await request);
       setRequestError(null);
     } catch (error) {
-      setRequestError(error instanceof Error ? error.message : String(error));
+      setRequestError(errorMessage(error));
     }
   }
   function updatePause() {
@@ -256,10 +260,10 @@ export function App() {
         </div>
 
         {requestError && <div className="error-banner" role="alert">{requestError}</div>}
-        {applicationStatus.storageError && <div className="error-banner" role="alert">{applicationStatus.storageError}</div>}
+        {applicationStatus.storageIssue && <div className="error-banner" role="alert"><div><strong>{t("storageError")}</strong><span>{applicationStatus.storageIssue.detail}. {t("storageRecovery")}</span></div></div>}
         {health.status === "loading" && !preferences.monitoringPaused && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
         {health.status === "loading" && preferences.monitoringPaused && <div className="state-panel" role="status">{t("empty")}</div>}
-        {health.status === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{health.message}</span></div><button type="button" onClick={() => void refresh()}>{t("retry")}</button></div>}
+        {health.status === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{health.message}</span></div><button type="button" onClick={() => void refresh(true)}>{t("retry")}</button></div>}
         {health.status === "stale" && !preferences.monitoringPaused && <div className="error-banner" role="status">{t("stale")}</div>}
         {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
         {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}

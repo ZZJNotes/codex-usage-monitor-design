@@ -14,7 +14,8 @@ use std::{
 
 use commands::{
     get_application_status, get_lifecycle_preferences, get_system_health,
-    get_system_health_history, set_locale, set_monitoring_paused, set_theme, show_dashboard,
+    get_system_health_history, refresh_system_health, set_locale, set_monitoring_paused, set_theme,
+    show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
@@ -33,7 +34,13 @@ pub(crate) struct AppState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApplicationStatus {
-    pub(crate) storage_error: Option<String>,
+    pub(crate) storage_issue: Option<StorageIssue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StorageIssue {
+    pub(crate) detail: String,
 }
 
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -51,6 +58,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_system_health,
             get_system_health_history,
+            refresh_system_health,
             get_application_status,
             get_lifecycle_preferences,
             set_monitoring_paused,
@@ -63,13 +71,11 @@ pub fn run() {
             let database_result = fs::create_dir_all(&data_dir)
                 .map_err(|error| error.to_string())
                 .and_then(|_| Database::open(&data_dir.join("monitor.sqlite3")));
-            let (database, storage_error, ephemeral_storage) = match database_result {
+            let (database, storage_issue, ephemeral_storage) = match database_result {
                 Ok(database) => (database, None, false),
                 Err(error) => (
                     Database::in_memory().map_err(std::io::Error::other)?,
-                    Some(format!(
-                        "本地数据库不可用：{error}。统计将不会持久保存；请检查应用数据目录权限后重启。"
-                    )),
+                    Some(StorageIssue { detail: error }),
                     true,
                 ),
             };
@@ -77,7 +83,7 @@ pub fn run() {
                 LifecycleService::new(Arc::new(database.clone())).map_err(std::io::Error::other)?,
             );
             let health = Arc::new(SystemHealthService::new(Arc::new(MacMetricSource::new())));
-            let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_error }));
+            let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
             app.manage(AppState {
                 health: health.clone(),
                 lifecycle: lifecycle.clone(),
@@ -93,33 +99,34 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(ActivationPolicy::Accessory);
 
-            thread::spawn(move || loop {
-                if let Ok(Some(SystemHealthState::Ready {
-                    updated_at,
-                    metrics,
-                })) = lifecycle.sample_if_active(&health)
-                {
-                    match database.record_health_metrics(updated_at, &metrics) {
-                        Ok(()) if !ephemeral_storage => {
-                            application_status
-                                .write()
-                                .expect("application status poisoned")
-                                .storage_error = None;
+            thread::spawn(move || {
+                loop {
+                    if let Ok(Some(SystemHealthState::Ready {
+                        updated_at,
+                        metrics,
+                    })) = lifecycle.sample_if_active(&health)
+                    {
+                        match database.record_health_metrics(updated_at, &metrics) {
+                            Ok(()) if !ephemeral_storage => {
+                                application_status
+                                    .write()
+                                    .expect("application status poisoned")
+                                    .storage_issue = None;
+                            }
+                            Err(error) => {
+                                application_status
+                                    .write()
+                                    .expect("application status poisoned")
+                                    .storage_issue = Some(StorageIssue {
+                                    detail: error.clone(),
+                                });
+                                health.report_error(error);
+                            }
+                            _ => {}
                         }
-                        Err(error) => {
-                            let message = format!(
-                                "系统指标无法保存：{error}。请检查应用数据目录权限后重试。"
-                            );
-                            application_status
-                                .write()
-                                .expect("application status poisoned")
-                                .storage_error = Some(message.clone());
-                            health.report_error(message);
-                        }
-                        _ => {}
                     }
+                    thread::sleep(Duration::from_secs(2));
                 }
-                thread::sleep(Duration::from_secs(2));
             });
             Ok(())
         })

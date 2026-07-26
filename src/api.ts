@@ -8,6 +8,7 @@ import type {
 
 export const monitorApi = {
   getHealth: () => invoke<HealthState>("get_system_health"),
+  refreshHealth: () => invoke<HealthState>("refresh_system_health"),
   getHealthHistory: () =>
     invoke<HealthPoint[]>("get_system_health_history"),
   getApplicationStatus: () =>

@@ -66,13 +66,20 @@ pub enum SystemHealthState {
     Stale {
         updated_at: DateTime<Utc>,
         metrics: SystemHealthMetrics,
-        reason: String,
+        reason: StaleReason,
     },
     Error {
         updated_at: DateTime<Utc>,
         message: String,
         last_metrics: Option<SystemHealthMetrics>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StaleReason {
+    Paused,
+    Outdated,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -105,6 +112,10 @@ impl SystemHealthService {
 
     pub fn latest(&self) -> SystemHealthState {
         self.state.read().expect("health state poisoned").clone()
+    }
+
+    pub fn reset_rate_baseline(&self) {
+        *self.previous.write().expect("previous sample poisoned") = None;
     }
 
     pub fn history(&self) -> Vec<SystemHealthPoint> {

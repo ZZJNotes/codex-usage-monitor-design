@@ -5,12 +5,16 @@ use crate::{
     AppState, ApplicationStatus,
     lifecycle::LifecyclePreferences,
     show_main_window,
-    system_health::{SystemHealthPoint, SystemHealthState},
+    system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     tray::{TrayMenuItems, update_tray_locale, update_tray_text},
 };
 
 #[tauri::command]
 pub(crate) fn get_system_health(state: State<'_, AppState>) -> SystemHealthState {
+    visible_system_health(&state)
+}
+
+fn visible_system_health(state: &AppState) -> SystemHealthState {
     let paused = state.lifecycle.preferences().monitoring_paused;
     match state.health.latest() {
         SystemHealthState::Ready {
@@ -19,10 +23,20 @@ pub(crate) fn get_system_health(state: State<'_, AppState>) -> SystemHealthState
         } if paused || (Utc::now() - updated_at).num_seconds() > 10 => SystemHealthState::Stale {
             updated_at,
             metrics,
-            reason: if paused { "paused" } else { "outdated" }.to_string(),
+            reason: if paused {
+                StaleReason::Paused
+            } else {
+                StaleReason::Outdated
+            },
         },
         current => current,
     }
+}
+
+#[tauri::command]
+pub(crate) fn refresh_system_health(state: State<'_, AppState>) -> SystemHealthState {
+    let _ = state.lifecycle.sample_if_active(&state.health);
+    visible_system_health(&state)
 }
 
 #[tauri::command]

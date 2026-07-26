@@ -20,7 +20,7 @@ beforeEach(() => {
       });
     }
     if (command === "get_application_status") {
-      return Promise.resolve({ storageError: null });
+      return Promise.resolve({ storageIssue: null });
     }
     if (command === "get_system_health_history") {
       return Promise.resolve([]);

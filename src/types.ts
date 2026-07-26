@@ -41,5 +41,5 @@ export type HealthPoint = {
 };
 
 export type ApplicationStatus = {
-  storageError: string | null;
+  storageIssue: { detail: string } | null;
 };
