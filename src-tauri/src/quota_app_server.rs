@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -8,10 +9,11 @@ use std::{
     time::Duration,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::quota::{QuotaSnapshot, QuotaSource, normalize_responses};
+use crate::quota::{QuotaAccount, QuotaSnapshot, QuotaSource, QuotaWindow};
 
 pub struct CodexAppServerSource {
     executable: PathBuf,
@@ -92,8 +94,10 @@ impl CodexAppServerSource {
                     .recv_timeout(Duration::from_secs(15))
                     .map_err(|_| "Reading ChatGPT quota timed out".to_string())?;
                 match message.get("id").and_then(Value::as_i64) {
-                    Some(2) => account = Some(result_value(message)?),
-                    Some(3) => rate_limits = Some(result_value(message)?),
+                    Some(2) => account = Some(result_value::<GetAccountResponse>(message)?),
+                    Some(3) => {
+                        rate_limits = Some(result_value::<GetAccountRateLimitsResponse>(message)?)
+                    }
                     _ => {}
                 }
             }
@@ -121,13 +125,155 @@ impl CodexAppServerSource {
 impl QuotaSource for CodexAppServerSource {
     fn refresh(&self) -> Result<QuotaSnapshot, String> {
         let response = self.request()?;
-        normalize_responses(&response.account, &response.rate_limits, Utc::now())
+        normalize_response(response, Utc::now())
     }
 }
 
 struct AppServerQuotaResponse {
-    account: Value,
-    rate_limits: Value,
+    account: GetAccountResponse,
+    rate_limits: GetAccountRateLimitsResponse,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetAccountResponse {
+    account: Option<Account>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum Account {
+    Chatgpt {
+        email: Option<String>,
+        #[serde(rename = "planType")]
+        plan_type: String,
+    },
+    #[serde(other)]
+    Unsupported,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetAccountRateLimitsResponse {
+    rate_limits: RateLimitSnapshot,
+    rate_limits_by_limit_id: Option<BTreeMap<String, RateLimitSnapshot>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitSnapshot {
+    limit_id: Option<String>,
+    limit_name: Option<String>,
+    #[serde(flatten)]
+    fields: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitWindow {
+    used_percent: i64,
+    resets_at: Option<i64>,
+    window_duration_mins: Option<u64>,
+}
+
+fn normalize_response(
+    response: AppServerQuotaResponse,
+    observed_at: DateTime<Utc>,
+) -> Result<QuotaSnapshot, String> {
+    let Account::Chatgpt { email, plan_type } = response
+        .account
+        .account
+        .ok_or_else(|| "The current Codex login is not a ChatGPT account".to_string())?
+    else {
+        return Err("The current Codex login is not a ChatGPT account".to_string());
+    };
+    let display_name = email.unwrap_or_else(|| "ChatGPT account".to_string());
+    let mut buckets = response
+        .rate_limits
+        .rate_limits_by_limit_id
+        .filter(|buckets| !buckets.is_empty())
+        .unwrap_or_else(|| {
+            let snapshot = response.rate_limits.rate_limits;
+            BTreeMap::from([(
+                snapshot
+                    .limit_id
+                    .clone()
+                    .unwrap_or_else(|| "codex".to_string()),
+                snapshot,
+            )])
+        });
+    let mut windows = Vec::new();
+    for (bucket_key, snapshot) in &mut buckets {
+        let bucket_name = snapshot
+            .limit_name
+            .as_deref()
+            .or(snapshot.limit_id.as_deref())
+            .unwrap_or(bucket_key);
+        let mut named_windows = snapshot
+            .fields
+            .iter()
+            .filter(|(_, value)| value.get("usedPercent").is_some())
+            .map(|(name, value)| {
+                serde_json::from_value::<RateLimitWindow>(value.clone())
+                    .map(|window| (name, window))
+                    .map_err(|error| {
+                        format!(
+                            "{bucket_name} {name} did not match the quota window schema: {error}"
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        named_windows.sort_by_key(|(name, _)| match name.as_str() {
+            "primary" => (0, name.as_str()),
+            "secondary" => (1, name.as_str()),
+            _ => (2, name.as_str()),
+        });
+        for (window_name, window) in named_windows {
+            if !(0..=100).contains(&window.used_percent) {
+                return Err(format!(
+                    "{bucket_name} {window_name} has an invalid quota percentage"
+                ));
+            }
+            let resets_at = window
+                .resets_at
+                .map(|timestamp| {
+                    DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+                        format!("{bucket_name} {window_name} has an invalid reset time")
+                    })
+                })
+                .transpose()?;
+            windows.push(QuotaWindow {
+                name: format!("{bucket_name} · {window_name}"),
+                remaining_percent: (100 - window.used_percent) as u8,
+                resets_at,
+                window_duration_minutes: window.window_duration_mins,
+            });
+        }
+    }
+    Ok(QuotaSnapshot {
+        account: QuotaAccount {
+            display_name,
+            plan_type,
+        },
+        windows,
+        updated_at: observed_at,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn normalize_responses(
+    account: &Value,
+    rate_limits: &Value,
+    observed_at: DateTime<Utc>,
+) -> Result<QuotaSnapshot, String> {
+    normalize_response(
+        AppServerQuotaResponse {
+            account: serde_json::from_value(account.clone()).map_err(|error| error.to_string())?,
+            rate_limits: serde_json::from_value(rate_limits.clone())
+                .map_err(|error| error.to_string())?,
+        },
+        observed_at,
+    )
 }
 
 fn send_request(stdin: &mut impl Write, request: Value) -> Result<(), String> {
@@ -146,7 +292,7 @@ fn wait_for_result(receiver: &mpsc::Receiver<Value>, id: i64) -> Result<Value, S
     }
 }
 
-fn result_value(message: Value) -> Result<Value, String> {
+fn result_value<T: DeserializeOwned>(message: Value) -> Result<T, String> {
     if let Some(error) = message.get("error") {
         return Err(error
             .get("message")
@@ -154,10 +300,12 @@ fn result_value(message: Value) -> Result<Value, String> {
             .unwrap_or("Codex app-server returned an error")
             .to_string());
     }
-    message
+    let result = message
         .get("result")
         .cloned()
-        .ok_or_else(|| "Codex app-server response did not contain a result".to_string())
+        .ok_or_else(|| "Codex app-server response did not contain a result".to_string())?;
+    serde_json::from_value(result)
+        .map_err(|error| format!("Codex app-server response did not match its schema: {error}"))
 }
 
 fn resolve_codex_executable() -> Option<PathBuf> {

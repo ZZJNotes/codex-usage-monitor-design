@@ -62,7 +62,7 @@ function toHealthView(health: HealthState, paused: boolean): HealthView {
 type QuotaView = {
   snapshot: QuotaSnapshot | null;
   notice: "loading" | "error" | null;
-  error: "paused" | "unavailable" | null;
+  error: "paused" | "storage" | "unavailable" | null;
 };
 
 function toQuotaView(quota: QuotaState): QuotaView {
@@ -75,7 +75,7 @@ function toQuotaView(quota: QuotaState): QuotaView {
       return {
         snapshot: quota.lastSnapshot,
         notice: "error",
-        error: quota.message === "monitoring_paused" ? "paused" : "unavailable",
+        error: quota.reason,
       };
   }
 }
@@ -246,7 +246,7 @@ export function App() {
     try {
       setQuota(await monitorApi.getQuota());
     } catch (error) {
-      setQuota({ status: "error", message: errorMessage(error), lastSnapshot: null });
+      setQuota({ status: "error", reason: "unavailable", lastSnapshot: null });
     }
   }, []);
 
@@ -255,7 +255,7 @@ export function App() {
     try {
       setQuota(await monitorApi.refreshQuota());
     } catch (error) {
-      setQuota({ status: "error", message: errorMessage(error), lastSnapshot: null });
+      setQuota({ status: "error", reason: "unavailable", lastSnapshot: null });
     } finally {
       setQuotaRefreshing(false);
     }
@@ -359,7 +359,7 @@ export function App() {
             </button>
           </div>
           {quotaView.notice === "loading" && <div className="quota-state" role="status">{t("quotaLoading")}</div>}
-          {quotaView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{t("quotaError")}</strong><span>{quotaView.error === "paused" ? t("quotaPaused") : t("quotaRecovery")}</span></div></div>}
+          {quotaView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{t("quotaError")}</strong><span>{quotaView.error === "paused" ? t("quotaPaused") : quotaView.error === "storage" ? t("quotaStorageRecovery") : t("quotaRecovery")}</span></div></div>}
           {quotaSnapshot && <div className="account-line"><span>{t("currentAccount")}: <strong>{quotaSnapshot.account.displayName}</strong></span><span>{t("plan")}: <strong>{quotaSnapshot.account.planType}</strong></span><time dateTime={quotaSnapshot.updatedAt}>{t("updated")} {new Intl.DateTimeFormat(formatLocale, { hour: "2-digit", minute: "2-digit" }).format(new Date(quotaSnapshot.updatedAt))}</time></div>}
           {quotaSnapshot && quotaSnapshot.windows.length === 0 && <div className="quota-state" role="status">{t("quotaEmpty")}</div>}
           {quotaSnapshot && quotaSnapshot.windows.length > 0 && <div className="quota-grid">

@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,9 +35,17 @@ pub enum QuotaState {
         snapshot: QuotaSnapshot,
     },
     Error {
-        message: String,
+        reason: QuotaErrorReason,
         last_snapshot: Option<QuotaSnapshot>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QuotaErrorReason {
+    Paused,
+    Storage,
+    Unavailable,
 }
 
 pub trait QuotaSource: Send + Sync {
@@ -71,15 +78,10 @@ impl QuotaService {
         source: Arc<dyn QuotaSource>,
         store: Arc<dyn QuotaStore>,
     ) -> Result<Self, String> {
-        let initial = store
-            .load_latest()?
-            .map_or(QuotaState::Loading, |snapshot| QuotaState::Ready {
-                snapshot,
-            });
         Ok(Self {
             source,
             store: Some(store),
-            state: RwLock::new(initial),
+            state: RwLock::new(QuotaState::Loading),
             refresh_lock: Mutex::new(()),
         })
     }
@@ -87,7 +89,7 @@ impl QuotaService {
     pub fn unavailable(message: String) -> Self {
         let service = Self::new(Arc::new(UnavailableQuotaSource(message.clone())));
         *service.state.write().expect("quota state poisoned") = QuotaState::Error {
-            message,
+            reason: QuotaErrorReason::Unavailable,
             last_snapshot: None,
         };
         service
@@ -97,13 +99,12 @@ impl QuotaService {
         message: String,
         store: Arc<dyn QuotaStore>,
     ) -> Result<Self, String> {
-        let last_snapshot = store.load_latest()?;
         Ok(Self {
-            source: Arc::new(UnavailableQuotaSource(message.clone())),
+            source: Arc::new(UnavailableQuotaSource(message)),
             store: Some(store),
             state: RwLock::new(QuotaState::Error {
-                message,
-                last_snapshot,
+                reason: QuotaErrorReason::Unavailable,
+                last_snapshot: None,
             }),
             refresh_lock: Mutex::new(()),
         })
@@ -121,12 +122,9 @@ impl QuotaService {
         match self.source.refresh() {
             Ok(snapshot) => {
                 if let Some(store) = &self.store
-                    && let Err(message) = store.save(&snapshot)
+                    && store.save(&snapshot).is_err()
                 {
-                    let state = QuotaState::Error {
-                        message,
-                        last_snapshot: Some(snapshot),
-                    };
+                    let state = self.error_state(QuotaErrorReason::Storage, Some(snapshot));
                     *self.state.write().expect("quota state poisoned") = state.clone();
                     return state;
                 }
@@ -134,19 +132,8 @@ impl QuotaService {
                 *self.state.write().expect("quota state poisoned") = state.clone();
                 state
             }
-            Err(message) => {
-                let last_snapshot = match self.latest() {
-                    QuotaState::Ready { snapshot }
-                    | QuotaState::Error {
-                        last_snapshot: Some(snapshot),
-                        ..
-                    } => Some(snapshot),
-                    _ => None,
-                };
-                let state = QuotaState::Error {
-                    message,
-                    last_snapshot,
-                };
+            Err(_) => {
+                let state = self.error_state(QuotaErrorReason::Unavailable, None);
                 *self.state.write().expect("quota state poisoned") = state.clone();
                 state
             }
@@ -154,16 +141,20 @@ impl QuotaService {
     }
 
     pub fn paused(&self) -> QuotaState {
+        self.error_state(QuotaErrorReason::Paused, None)
+    }
+
+    fn error_state(&self, reason: QuotaErrorReason, fallback: Option<QuotaSnapshot>) -> QuotaState {
         let last_snapshot = match self.latest() {
             QuotaState::Ready { snapshot }
             | QuotaState::Error {
                 last_snapshot: Some(snapshot),
                 ..
             } => Some(snapshot),
-            _ => None,
+            _ => fallback,
         };
         QuotaState::Error {
-            message: "monitoring_paused".to_string(),
+            reason,
             last_snapshot,
         }
     }
@@ -177,103 +168,13 @@ impl QuotaSource for UnavailableQuotaSource {
     }
 }
 
-pub(crate) fn normalize_responses(
-    account_result: &Value,
-    rate_limit_result: &Value,
-    observed_at: DateTime<Utc>,
-) -> Result<QuotaSnapshot, String> {
-    let account = account_result
-        .get("account")
-        .filter(|account| account.get("type").and_then(Value::as_str) == Some("chatgpt"))
-        .ok_or_else(|| "The current Codex login is not a ChatGPT account".to_string())?;
-    let display_name = account
-        .get("email")
-        .and_then(Value::as_str)
-        .unwrap_or("ChatGPT account")
-        .to_string();
-    let plan_type = account
-        .get("planType")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let mut buckets = Vec::new();
-    if let Some(by_limit_id) = rate_limit_result
-        .get("rateLimitsByLimitId")
-        .and_then(Value::as_object)
-        .filter(|value| !value.is_empty())
-    {
-        let mut entries = by_limit_id.iter().collect::<Vec<_>>();
-        entries.sort_by_key(|(key, _)| *key);
-        for (key, snapshot) in entries {
-            buckets.push((key.as_str(), snapshot));
-        }
-    } else if let Some(snapshot) = rate_limit_result.get("rateLimits") {
-        let key = snapshot
-            .get("limitId")
-            .and_then(Value::as_str)
-            .unwrap_or("codex");
-        buckets.push((key, snapshot));
-    }
-    let mut windows = Vec::new();
-    for (bucket_key, snapshot) in buckets {
-        let bucket_name = snapshot
-            .get("limitName")
-            .and_then(Value::as_str)
-            .or_else(|| snapshot.get("limitId").and_then(Value::as_str))
-            .unwrap_or(bucket_key);
-        let mut named_windows = snapshot
-            .as_object()
-            .into_iter()
-            .flat_map(|fields| fields.iter())
-            .filter(|(_, value)| value.get("usedPercent").is_some())
-            .collect::<Vec<_>>();
-        named_windows.sort_by_key(|(name, _)| match name.as_str() {
-            "primary" => (0, name.as_str()),
-            "secondary" => (1, name.as_str()),
-            _ => (2, name.as_str()),
-        });
-        for (window_name, window) in named_windows {
-            let used_percent = window
-                .get("usedPercent")
-                .and_then(Value::as_i64)
-                .filter(|value| (0..=100).contains(value))
-                .ok_or_else(|| {
-                    format!("{bucket_name} {window_name} has an invalid quota percentage")
-                })?;
-            let resets_at = window
-                .get("resetsAt")
-                .and_then(Value::as_i64)
-                .map(|timestamp| {
-                    DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
-                        format!("{bucket_name} {window_name} has an invalid reset time")
-                    })
-                })
-                .transpose()?;
-            windows.push(QuotaWindow {
-                name: format!("{bucket_name} · {window_name}"),
-                remaining_percent: (100 - used_percent) as u8,
-                resets_at,
-                window_duration_minutes: window.get("windowDurationMins").and_then(Value::as_u64),
-            });
-        }
-    }
-    Ok(QuotaSnapshot {
-        account: QuotaAccount {
-            display_name,
-            plan_type,
-        },
-        windows,
-        updated_at: observed_at,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
     use super::*;
-    use crate::quota_app_server::CodexAppServerSource;
+    use crate::quota_app_server::{CodexAppServerSource, normalize_responses};
 
     struct StaticQuotaSource(QuotaSnapshot);
 
@@ -358,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn restores_the_last_snapshot_when_the_cli_is_unavailable_after_restart() {
+    fn persists_a_snapshot_without_restoring_it_to_an_unverified_account() {
         let database = Arc::new(crate::database::Database::in_memory().unwrap());
         let snapshot = QuotaSnapshot {
             account: QuotaAccount {
@@ -380,17 +281,20 @@ mod tests {
             }
         );
 
-        let restored =
-            QuotaService::unavailable_with_store("Codex CLI is unavailable".to_string(), database)
-                .unwrap();
+        let unavailable = QuotaService::unavailable_with_store(
+            "Codex CLI is unavailable".to_string(),
+            database.clone(),
+        )
+        .unwrap();
 
         assert_eq!(
-            restored.latest(),
+            unavailable.latest(),
             QuotaState::Error {
-                message: "Codex CLI is unavailable".to_string(),
-                last_snapshot: Some(snapshot),
+                reason: QuotaErrorReason::Unavailable,
+                last_snapshot: None,
             }
         );
+        assert_eq!(database.load_latest().unwrap(), Some(snapshot));
     }
 
     #[test]

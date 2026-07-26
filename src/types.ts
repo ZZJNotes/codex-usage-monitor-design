@@ -60,4 +60,8 @@ export type QuotaSnapshot = {
 export type QuotaState =
   | { status: "loading" }
   | { status: "ready"; snapshot: QuotaSnapshot }
-  | { status: "error"; message: string; lastSnapshot: QuotaSnapshot | null };
+  | {
+      status: "error";
+      reason: "paused" | "storage" | "unavailable";
+      lastSnapshot: QuotaSnapshot | null;
+    };

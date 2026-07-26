@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { beforeEach, expect, test, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
@@ -7,7 +7,26 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { App } from "./App";
 
+let quotaResponse: unknown;
+
+afterEach(cleanup);
+
 beforeEach(() => {
+  quotaResponse = {
+    status: "ready",
+    snapshot: {
+      account: { displayName: "user@example.com", planType: "plus" },
+      windows: [
+        {
+          name: "codex · primary",
+          remainingPercent: 85,
+          resetsAt: "2026-08-02T12:00:00Z",
+          windowDurationMinutes: 10080,
+        },
+      ],
+      updatedAt: "2026-07-26T12:00:00Z",
+    },
+  };
   invoke.mockReset();
   invoke.mockImplementation((command: string) => {
     if (command === "get_lifecycle_preferences") {
@@ -26,21 +45,7 @@ beforeEach(() => {
       return Promise.resolve([]);
     }
     if (command === "get_quota_state") {
-      return Promise.resolve({
-        status: "ready",
-        snapshot: {
-          account: { displayName: "user@example.com", planType: "plus" },
-          windows: [
-            {
-              name: "codex · primary",
-              remainingPercent: 85,
-              resetsAt: "2026-08-02T12:00:00Z",
-              windowDurationMinutes: 10080,
-            },
-          ],
-          updatedAt: "2026-07-26T12:00:00Z",
-        },
-      });
+      return Promise.resolve(quotaResponse);
     }
     if (command === "get_system_health") {
       return Promise.resolve({
@@ -63,6 +68,15 @@ beforeEach(() => {
     }
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
+});
+
+test("gives storage-specific recovery instead of blaming Codex authentication", async () => {
+  quotaResponse = { status: "error", reason: "storage", lastSnapshot: null };
+
+  render(<App />);
+
+  expect(await screen.findByText(/无法保存快照/)).toBeVisible();
+  expect(screen.queryByText(/确认 Codex 已使用 ChatGPT 账户登录/)).not.toBeInTheDocument();
 });
 
 test("shows a textual loading state before rendering understandable system metrics", async () => {
