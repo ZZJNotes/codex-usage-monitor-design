@@ -29,10 +29,30 @@ export type HealthState =
 
 export type LifecyclePreferences = {
   monitoringPaused: boolean;
+  retentionDays: number;
   locale: "zh-CN" | "en";
   theme: "system" | "light" | "dark";
   showInDock: boolean;
   launchAtLogin: boolean;
+};
+
+export type HistoryCleanupResult = {
+  quotaSnapshotsDeleted: number;
+  tokenEventsDeleted: number;
+  systemAggregatesDeleted: number;
+  sessionAttributionsDeleted: number;
+  accountMetadataDeleted: number;
+};
+
+export type ExportArtifact = {
+  filename: string;
+  mimeType: string;
+  content: string;
+};
+
+export type CredentialDeletionStatus = {
+  status: "unavailable";
+  reason: "keychainIntegrationUnavailable";
 };
 
 export type HealthPoint = {

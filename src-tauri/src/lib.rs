@@ -1,5 +1,6 @@
 mod commands;
 pub mod database;
+pub mod governance;
 pub mod lifecycle;
 pub mod platform_metrics;
 pub mod quota;
@@ -18,12 +19,15 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use commands::{
-    get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, get_token_usage, reassign_token_session, recover_quota,
-    refresh_quota, refresh_system_health, refresh_token_usage, set_locale, set_monitoring_paused,
-    set_theme, show_dashboard,
+    cleanup_expired_history, clear_history, delete_account_history, export_statistics,
+    get_application_status, get_credential_deletion_status, get_lifecycle_preferences,
+    get_quota_state, get_system_health, get_system_health_history, get_token_usage,
+    reassign_token_session, recover_quota, refresh_quota, refresh_system_health,
+    refresh_token_usage, request_credential_deletion, set_locale, set_monitoring_paused,
+    set_retention_days, set_theme, show_dashboard,
 };
 use database::Database;
+use governance::DataGovernanceService;
 use lifecycle::LifecycleService;
 use platform_metrics::MacMetricSource;
 use quota::{CURRENT_CODEX_ACCOUNT_ID, QuotaRefreshCoordinator, QuotaService};
@@ -39,6 +43,7 @@ pub(crate) struct AppState {
     pub(crate) lifecycle: Arc<LifecycleService>,
     pub(crate) quota: Arc<QuotaService>,
     pub(crate) token_usage: Arc<TokenUsageService>,
+    pub(crate) governance: Arc<DataGovernanceService>,
     pub(crate) application_status: Arc<RwLock<ApplicationStatus>>,
 }
 
@@ -128,6 +133,13 @@ pub fn run() {
             set_theme,
             set_locale,
             show_dashboard,
+            set_retention_days,
+            cleanup_expired_history,
+            clear_history,
+            delete_account_history,
+            export_statistics,
+            get_credential_deletion_status,
+            request_credential_deletion,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -167,11 +179,15 @@ pub fn run() {
                 Arc::new(CurrentQuotaAccountEvidence(quota.clone())),
             ));
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
+            let governance = Arc::new(DataGovernanceService::new(database.clone()));
+            let _ =
+                governance.cleanup_retention(lifecycle.preferences().retention_days, Utc::now());
             app.manage(AppState {
                 health: health.clone(),
                 lifecycle: lifecycle.clone(),
                 quota: quota.clone(),
                 token_usage: token_usage.clone(),
+                governance,
                 application_status: application_status.clone(),
             });
             let preferences = lifecycle.preferences();

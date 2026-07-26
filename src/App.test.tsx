@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import { App } from "./App";
 
 let quotaResponse: unknown;
+let preferenceResponse: unknown;
 
 afterEach(cleanup);
 
@@ -27,16 +28,18 @@ beforeEach(() => {
       updatedAt: "2026-07-26T12:00:00Z",
     },
   };
+  preferenceResponse = {
+    monitoringPaused: false,
+    retentionDays: 90,
+    locale: "zh-CN",
+    theme: "system",
+    showInDock: false,
+    launchAtLogin: false,
+  };
   invoke.mockReset();
   invoke.mockImplementation((command: string) => {
     if (command === "get_lifecycle_preferences") {
-      return Promise.resolve({
-        monitoringPaused: false,
-        locale: "zh-CN",
-        theme: "system",
-        showInDock: false,
-        launchAtLogin: false,
-      });
+      return Promise.resolve(preferenceResponse);
     }
     if (command === "show_dashboard") {
       return Promise.resolve();
@@ -103,6 +106,22 @@ beforeEach(() => {
     }
     if (command === "reassign_token_session") {
       return Promise.resolve();
+    }
+    if (command === "get_credential_deletion_status") {
+      return Promise.resolve({ status: "unavailable", reason: "keychainIntegrationUnavailable" });
+    }
+    if (command === "set_retention_days") {
+      return Promise.resolve({
+        monitoringPaused: false,
+        retentionDays: 30,
+        locale: "zh-CN",
+        theme: "system",
+        showInDock: false,
+        launchAtLogin: false,
+      });
+    }
+    if (command === "cleanup_expired_history") {
+      return Promise.resolve({ quotaSnapshotsDeleted: 1, tokenEventsDeleted: 2, systemAggregatesDeleted: 3, sessionAttributionsDeleted: 1, accountMetadataDeleted: 1 });
     }
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
@@ -236,4 +255,40 @@ test("shows unassigned ownership, filters by account, and offers an accessible c
     sessionId: "sanitized-session-01",
     accountKey: "acct_a",
   }));
+});
+
+test("offers local retention cleanup and safe export while explaining credential deletion availability", async () => {
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "数据与隐私" })).toBeVisible();
+  expect(screen.getByLabelText("统计保留期")).toHaveValue("90");
+  expect(screen.getByRole("button", { name: "清理过期历史" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "清空全部历史" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "导出 JSON" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "导出 CSV" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "删除账户凭据" })).toBeDisabled();
+  expect(screen.getByText(/Keychain 多账户授权完成后才可用/)).toBeVisible();
+
+  fireEvent.change(screen.getByLabelText("统计保留期"), { target: { value: "30" } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_retention_days", { retentionDays: 30 }));
+  fireEvent.click(screen.getByRole("button", { name: "清理过期历史" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("cleanup_expired_history"));
+  expect(await screen.findByText("本地数据操作已完成。")).toBeVisible();
+});
+
+test("explains that a persisted pause survives restart until the user resumes", async () => {
+  preferenceResponse = {
+    monitoringPaused: true,
+    retentionDays: 90,
+    locale: "zh-CN",
+    theme: "system",
+    showInDock: false,
+    launchAtLogin: false,
+  };
+
+  render(<App />);
+
+  expect(await screen.findByText(/重启后仍保持暂停/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "恢复监控" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "刷新额度" })).toBeDisabled();
 });

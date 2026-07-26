@@ -11,10 +11,16 @@ use crate::system_health::{SystemHealthService, SystemHealthState};
 #[serde(rename_all = "camelCase")]
 pub struct LifecyclePreferences {
     pub monitoring_paused: bool,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
     pub locale: Locale,
     pub theme: Theme,
     pub show_in_dock: bool,
     pub launch_at_login: bool,
+}
+
+fn default_retention_days() -> u32 {
+    90
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -62,6 +68,7 @@ impl Default for LifecyclePreferences {
     fn default() -> Self {
         Self {
             monitoring_paused: false,
+            retention_days: default_retention_days(),
             locale: Locale::ZhCn,
             theme: Theme::System,
             show_in_dock: false,
@@ -110,6 +117,13 @@ impl LifecycleService {
     pub fn set_theme(&self, theme: &str) -> Result<LifecyclePreferences, String> {
         let theme = Theme::try_from(theme)?;
         self.update(|preferences| preferences.theme = theme)
+    }
+
+    pub fn set_retention_days(&self, retention_days: u32) -> Result<LifecyclePreferences, String> {
+        if !(1..=3650).contains(&retention_days) {
+            return Err("retention days must be between 1 and 3650".to_string());
+        }
+        self.update(|preferences| preferences.retention_days = retention_days)
     }
 
     pub fn set_locale(&self, locale: &str) -> Result<LifecyclePreferences, String> {
@@ -235,5 +249,20 @@ mod tests {
             Err("unsupported theme".to_string())
         );
         assert_eq!(lifecycle.preferences(), LifecyclePreferences::default());
+    }
+
+    #[test]
+    fn retention_period_is_validated_and_persisted_at_the_preferences_seam() {
+        let store = Arc::new(MemoryPreferenceStore::default());
+        let lifecycle = LifecycleService::new(store.clone()).unwrap();
+
+        assert_eq!(
+            lifecycle.set_retention_days(0),
+            Err("retention days must be between 1 and 3650".to_string())
+        );
+        assert_eq!(lifecycle.set_retention_days(30).unwrap().retention_days, 30);
+
+        let restarted = LifecycleService::new(store).unwrap();
+        assert_eq!(restarted.preferences().retention_days, 30);
     }
 }

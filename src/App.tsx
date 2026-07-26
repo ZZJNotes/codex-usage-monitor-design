@@ -5,6 +5,7 @@ import { TokenUsageSection } from "./token-usage/TokenUsageSection";
 import { useTokenUsage } from "./token-usage/useTokenUsage";
 import type {
   ApplicationStatus,
+  CredentialDeletionStatus,
   HealthMetrics,
   HealthPoint,
   HealthState,
@@ -16,6 +17,7 @@ import "./app.css";
 
 const defaultPreferences: LifecyclePreferences = {
   monitoringPaused: false,
+  retentionDays: 90,
   locale: "zh-CN",
   theme: "system",
   showInDock: false,
@@ -210,6 +212,12 @@ export function App() {
   const [quota, setQuota] = useState<QuotaState>({ status: "loading" });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const tokenUsage = useTokenUsage();
+  const [credentialDeletion, setCredentialDeletion] = useState<CredentialDeletionStatus>({
+    status: "unavailable",
+    reason: "keychainIntegrationUnavailable",
+  });
+  const [governanceMessage, setGovernanceMessage] = useState<string | null>(null);
+  const [governanceAccount, setGovernanceAccount] = useState("");
   const [quotaClock, setQuotaClock] = useState(() => Date.now());
   const [requestError, setRequestError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
@@ -241,12 +249,14 @@ export function App() {
 
   const refreshPreferences = useCallback(async () => {
     try {
-      const [nextPreferences, nextStatus] = await Promise.all([
+      const [nextPreferences, nextStatus, nextCredentialDeletion] = await Promise.all([
         monitorApi.getPreferences(),
         monitorApi.getApplicationStatus(),
+        monitorApi.getCredentialDeletionStatus(),
       ]);
       setPreferences(nextPreferences);
       setApplicationStatus(nextStatus);
+      setCredentialDeletion(nextCredentialDeletion);
     } catch (error) {
       setRequestError(errorMessage(error));
     }
@@ -347,6 +357,39 @@ export function App() {
   function updateLocale(locale: LifecyclePreferences["locale"]) {
     return applyPreferenceMutation(monitorApi.setLocale(locale));
   }
+
+  function updateRetention(retentionDays: number) {
+    return applyPreferenceMutation(monitorApi.setRetentionDays(retentionDays));
+  }
+
+  async function runGovernance(action: Promise<unknown>) {
+    try {
+      await action;
+      setGovernanceMessage(t("governanceDone"));
+      setRequestError(null);
+    } catch (error) {
+      setRequestError(errorMessage(error));
+    }
+  }
+
+  async function downloadExport(format: "json" | "csv") {
+    try {
+      const artifact = await monitorApi.exportStatistics(format);
+      const url = URL.createObjectURL(new Blob([artifact.content], { type: artifact.mimeType }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = artifact.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      setGovernanceMessage(t("governanceDone"));
+    } catch (error) {
+      setRequestError(errorMessage(error));
+    }
+  }
+
+  const tokenData = tokenUsage.state.status === "ready" ? tokenUsage.state.data
+    : tokenUsage.state.status === "stale" ? tokenUsage.state.data
+      : tokenUsage.state.status === "error" ? tokenUsage.state.lastData : null;
 
   const healthView = toHealthView(health, preferences.monitoringPaused);
   const shownMetrics = healthView.metrics;
@@ -451,6 +494,45 @@ export function App() {
         {healthView.notice === "stale" && <div className="error-banner" role="status">{t("stale")}</div>}
         {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
         {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
+
+        <section className="governance-card" aria-labelledby="governance-heading">
+          <div className="governance-heading">
+            <div>
+              <p className="eyebrow">{t("localOnly")}</p>
+              <h2 id="governance-heading">{t("dataPrivacy")}</h2>
+              <p>{t("dataPrivacyHelp")}</p>
+            </div>
+            <div className="governance-actions">
+              <button type="button" onClick={() => void downloadExport("json")}>{t("exportJson")}</button>
+              <button type="button" onClick={() => void downloadExport("csv")}>{t("exportCsv")}</button>
+            </div>
+          </div>
+          <div className="governance-grid">
+            <label>{t("retention")}
+              <select value={preferences.retentionDays} onChange={(event) => void updateRetention(Number(event.target.value))}>
+                {[7, 30, 90, 180, 365].map((days) => <option key={days} value={days}>{t("retentionDays", { days: String(days) })}</option>)}
+              </select>
+            </label>
+            <button type="button" onClick={() => void runGovernance(monitorApi.cleanupExpiredHistory())}>{t("cleanupExpired")}</button>
+            <button className="danger-button" type="button" onClick={() => {
+              if (window.confirm(t("governanceConfirmClear"))) void runGovernance(monitorApi.clearHistory());
+            }}>{t("clearAllHistory")}</button>
+          </div>
+          <div className="governance-grid">
+            <label>{t("accountHistory")}
+              <select value={governanceAccount} onChange={(event) => setGovernanceAccount(event.target.value)}>
+                <option value="">{t("chooseAccount")}</option>
+                {(tokenData?.accounts ?? []).map((account) => <option key={account.accountKey} value={account.accountKey}>{account.displayName}</option>)}
+              </select>
+            </label>
+            <button type="button" disabled={!governanceAccount} onClick={() => {
+              if (governanceAccount && window.confirm(t("governanceConfirmAccount"))) void runGovernance(monitorApi.deleteAccountHistory(governanceAccount));
+            }}>{t("deleteAccountHistory")}</button>
+            <button type="button" disabled={credentialDeletion.status === "unavailable"}>{t("deleteCredentials")}</button>
+          </div>
+          {credentialDeletion.status === "unavailable" && <p className="governance-note" role="status">{t("credentialUnavailable")}</p>}
+          {governanceMessage && <p className="governance-note" role="status">{governanceMessage}</p>}
+        </section>
 
         <section className="settings-card" aria-labelledby="appearance-heading">
           <div>

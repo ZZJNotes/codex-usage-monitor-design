@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ApplicationStatus,
+  CredentialDeletionStatus,
+  ExportArtifact,
   HealthPoint,
   HealthState,
+  HistoryCleanupResult,
   LifecyclePreferences,
   QuotaState,
   TokenUsageFilters,
@@ -34,4 +37,17 @@ export const monitorApi = {
     invoke<LifecyclePreferences>("set_theme", { theme }),
   setLocale: (locale: LifecyclePreferences["locale"]) =>
     invoke<LifecyclePreferences>("set_locale", { locale }),
+  setRetentionDays: (retentionDays: number) =>
+    invoke<LifecyclePreferences>("set_retention_days", { retentionDays }),
+  cleanupExpiredHistory: () =>
+    invoke<HistoryCleanupResult>("cleanup_expired_history"),
+  clearHistory: () => invoke<HistoryCleanupResult>("clear_history"),
+  deleteAccountHistory: (accountKey: string) =>
+    invoke<HistoryCleanupResult>("delete_account_history", { accountKey }),
+  exportStatistics: (format: "json" | "csv") =>
+    invoke<ExportArtifact>("export_statistics", { format }),
+  getCredentialDeletionStatus: () =>
+    invoke<CredentialDeletionStatus>("get_credential_deletion_status"),
+  requestCredentialDeletion: (accountKey: string) =>
+    invoke<void>("request_credential_deletion", { accountKey }),
 };
