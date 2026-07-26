@@ -39,9 +39,20 @@ beforeEach(() => {
       displayLimit: 3,
       pinnedAccountId: null,
     },
+    notifications: {
+      enabled: true,
+      quotaThresholds: [20, 10, 0],
+      diskAvailablePercentThreshold: 10,
+      consecutiveRefreshFailures: 3,
+    },
   };
   invoke.mockReset();
   invoke.mockImplementation((command: string, args?: unknown) => {
+    if (command === "set_notification_preferences") {
+      const notifications = (args as { notifications: unknown }).notifications;
+      preferencesResponse = { ...preferencesResponse, notifications };
+      return Promise.resolve(preferencesResponse);
+    }
     if (command === "set_menu_bar_preferences") {
       const menuBar = (args as { menuBar: unknown }).menuBar;
       preferencesResponse = { ...preferencesResponse, menuBar };
@@ -55,6 +66,17 @@ beforeEach(() => {
     }
     if (command === "get_application_status") {
       return Promise.resolve({ storageIssue: null });
+    }
+    if (command === "get_notification_status") {
+      return Promise.resolve({
+        activeConditions: [{ key: "disk", label: "Disk available space ≤ 10%", accountId: null }],
+        lastNotification: {
+          sentAt: "2026-07-27T10:00:00Z",
+          title: "磁盘可用空间不足",
+          body: "原因：磁盘空间不足。影响：本地统计可能失败。恢复：释放磁盘空间。",
+        },
+        deliveryError: null,
+      });
     }
     if (command === "get_system_health_history") {
       return Promise.resolve([]);
@@ -137,6 +159,7 @@ test("configures an ordered limited menu bar without inventing managed account m
     if (command === "get_lifecycle_preferences") return Promise.resolve(preferencesResponse);
     if (command === "show_dashboard") return Promise.resolve();
     if (command === "get_application_status") return Promise.resolve({ storageIssue: null });
+    if (command === "get_notification_status") return Promise.resolve({ activeConditions: [], lastNotification: null, deliveryError: null });
     if (command === "get_system_health_history") return Promise.resolve([]);
     if (command === "get_quota_state") return Promise.resolve(quotaResponse);
     if (command === "get_token_usage") return Promise.resolve({ status: "loading" });
@@ -162,6 +185,26 @@ test("configures an ordered limited menu bar without inventing managed account m
     },
   }));
   expect(screen.getByText(/键盘操作/)).toBeVisible();
+});
+
+test("shows notification thresholds and textual active status with cause impact and recovery", async () => {
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "通知设置与状态" })).toBeVisible();
+  expect(screen.getByRole("checkbox", { name: "启用系统通知" })).toBeChecked();
+  expect(screen.getByLabelText("额度阈值")).toHaveValue("20, 10, 0");
+  expect(screen.getByLabelText("磁盘可用空间阈值")).toHaveValue(10);
+  expect(screen.getByText("磁盘可用空间 ≤ 10%")).toBeVisible();
+  expect(screen.getByText(/原因：磁盘空间不足。影响：本地统计可能失败。恢复：释放磁盘空间。/)).toBeVisible();
+  fireEvent.click(screen.getByRole("checkbox", { name: "启用系统通知" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_notification_preferences", {
+    notifications: {
+      enabled: false,
+      quotaThresholds: [20, 10, 0],
+      diskAvailablePercentThreshold: 10,
+      consecutiveRefreshFailures: 3,
+    },
+  }));
 });
 
 test("keeps a disappeared quota window configurable so it can be removed", async () => {

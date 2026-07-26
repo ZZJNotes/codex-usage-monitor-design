@@ -4,6 +4,7 @@ use tauri::{AppHandle, State};
 use crate::{
     AppState, ApplicationStatus,
     lifecycle::{LifecyclePreferences, MenuBarPreferences},
+    notification::{NotificationPolicy, NotificationStatus},
     quota::{QuotaService, QuotaState},
     set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
@@ -159,6 +160,11 @@ pub(crate) fn get_lifecycle_preferences(state: State<'_, AppState>) -> Lifecycle
 }
 
 #[tauri::command]
+pub(crate) fn get_notification_status(state: State<'_, AppState>) -> NotificationStatus {
+    state.notifications.status()
+}
+
+#[tauri::command]
 pub(crate) fn set_monitoring_paused(
     paused: bool,
     state: State<'_, AppState>,
@@ -201,6 +207,14 @@ pub(crate) fn set_menu_bar_preferences(
     let preferences = state.lifecycle.set_menu_bar(menu_bar)?;
     update_tray(&app, &tray);
     Ok(preferences)
+}
+
+#[tauri::command]
+pub(crate) fn set_notification_preferences(
+    notifications: NotificationPolicy,
+    state: State<'_, AppState>,
+) -> Result<LifecyclePreferences, String> {
+    state.lifecycle.set_notifications(notifications)
 }
 
 #[tauri::command]

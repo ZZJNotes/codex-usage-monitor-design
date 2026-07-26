@@ -1,6 +1,7 @@
 mod commands;
 pub mod database;
 pub mod lifecycle;
+pub mod notification;
 pub mod platform_metrics;
 pub mod quota;
 mod quota_app_server;
@@ -19,13 +20,15 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use commands::{
-    get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, get_token_usage, reassign_token_session, recover_quota,
-    refresh_quota, refresh_system_health, refresh_token_usage, set_locale,
-    set_menu_bar_preferences, set_monitoring_paused, set_theme, show_dashboard,
+    get_application_status, get_lifecycle_preferences, get_notification_status, get_quota_state,
+    get_system_health, get_system_health_history, get_token_usage, reassign_token_session,
+    recover_quota, refresh_quota, refresh_system_health, refresh_token_usage, set_locale,
+    set_menu_bar_preferences, set_monitoring_paused, set_notification_preferences, set_theme,
+    show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
+use notification::{MacOsNotificationSender, NotificationLocale, NotificationService};
 use platform_metrics::MacMetricSource;
 use quota::{CURRENT_CODEX_ACCOUNT_ID, QuotaRefreshCoordinator, QuotaService};
 use quota_app_server::CodexAppServerSource;
@@ -40,6 +43,7 @@ pub(crate) struct AppState {
     pub(crate) lifecycle: Arc<LifecycleService>,
     pub(crate) quota: Arc<QuotaService>,
     pub(crate) token_usage: Arc<TokenUsageService>,
+    pub(crate) notifications: Arc<NotificationService>,
     pub(crate) application_status: Arc<RwLock<ApplicationStatus>>,
 }
 
@@ -90,6 +94,36 @@ fn current_quota_account_evidence(
     })
 }
 
+fn notification_account(state: &quota::QuotaState) -> (quota::AccountId, String) {
+    let snapshot = match state {
+        quota::QuotaState::Ready { snapshot, .. } | quota::QuotaState::Stale { snapshot, .. } => {
+            Some(snapshot)
+        }
+        quota::QuotaState::Error {
+            last_snapshot: Some(snapshot),
+            ..
+        }
+        | quota::QuotaState::Cooldown {
+            snapshot: Some(snapshot),
+            ..
+        } => Some(snapshot),
+        _ => None,
+    };
+    snapshot
+        .map(|snapshot| {
+            (
+                snapshot.account.id.clone(),
+                snapshot.account.display_name.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                quota::AccountId::from(CURRENT_CODEX_ACCOUNT_ID),
+                "Current Codex account".to_string(),
+            )
+        })
+}
+
 pub(crate) fn set_monitoring_paused_with_account_evidence(
     lifecycle: &LifecycleService,
     quota: &QuotaService,
@@ -113,6 +147,7 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_system_health,
             get_system_health_history,
@@ -125,10 +160,12 @@ pub fn run() {
             reassign_token_session,
             get_application_status,
             get_lifecycle_preferences,
+            get_notification_status,
             set_monitoring_paused,
             set_theme,
             set_locale,
             set_menu_bar_preferences,
+            set_notification_preferences,
             show_dashboard,
         ])
         .setup(|app| {
@@ -160,6 +197,13 @@ pub fn run() {
                     Arc::new(database.clone()),
                 ),
             });
+            let notifications = Arc::new(
+                NotificationService::new(
+                    Arc::new(database.clone()),
+                    Arc::new(MacOsNotificationSender::new(app.handle().clone())),
+                )
+                .map_err(std::io::Error::other)?,
+            );
             if !lifecycle.preferences().monitoring_paused {
                 quota.refresh_account_evidence();
             }
@@ -174,6 +218,7 @@ pub fn run() {
                 lifecycle: lifecycle.clone(),
                 quota: quota.clone(),
                 token_usage: token_usage.clone(),
+                notifications: notifications.clone(),
                 application_status: application_status.clone(),
             });
             let preferences = lifecycle.preferences();
@@ -197,6 +242,19 @@ pub fn run() {
                         metrics,
                     })) = lifecycle.sample_if_active(&health)
                     {
+                        let preferences = lifecycle.preferences();
+                        let locale = match preferences.locale {
+                            lifecycle::Locale::ZhCn => NotificationLocale::Chinese,
+                            lifecycle::Locale::En => NotificationLocale::English,
+                        };
+                        let _ = notifications.evaluate_system(
+                            &SystemHealthState::Ready {
+                                updated_at,
+                                metrics: metrics.clone(),
+                            },
+                            &preferences.notifications,
+                            locale,
+                        );
                         match database.record_health_metrics(updated_at, &metrics) {
                             Ok(()) if !ephemeral_storage => {
                                 application_status
@@ -220,6 +278,8 @@ pub fn run() {
                 }
             });
             let quota_lifecycle = app.state::<AppState>().lifecycle.clone();
+            let quota_notifications = app.state::<AppState>().notifications.clone();
+            let notification_quota = quota.clone();
             let quota_refresh = QuotaRefreshCoordinator::new(vec![quota]);
             thread::spawn(move || {
                 let mut previous_tick = Utc::now();
@@ -232,6 +292,20 @@ pub fn run() {
                             quota_refresh.refresh_due();
                         }
                         previous_tick = now;
+                        let preferences = quota_lifecycle.preferences();
+                        let state = notification_quota.latest();
+                        let (account_id, display_name) = notification_account(&state);
+                        let locale = match preferences.locale {
+                            lifecycle::Locale::ZhCn => NotificationLocale::Chinese,
+                            lifecycle::Locale::En => NotificationLocale::English,
+                        };
+                        let _ = quota_notifications.evaluate_account(
+                            &account_id,
+                            &display_name,
+                            &state,
+                            &preferences.notifications,
+                            locale,
+                        );
                     }
                     thread::sleep(Duration::from_secs(5));
                 }

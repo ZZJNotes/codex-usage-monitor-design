@@ -23,6 +23,7 @@ sha2 = "0.10.9"
 sysinfo = "=0.38.4"
 sys-locale = "0.3.2"
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.3.3"
 thiserror = "2.0.17"
 
 [dev-dependencies]

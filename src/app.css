@@ -137,6 +137,19 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
 .settings-card select { min-width: 138px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 30px 8px 10px; color: var(--ink); background: var(--surface-solid); }
 
 .menu-bar-settings { margin-top: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
+.notification-settings { margin-top: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
+.notification-settings h2 { margin: 0; font-size: 20px; }
+.notification-settings > div:first-child > p:not(.eyebrow) { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.notification-controls { margin-top: 18px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.notification-controls label { display: grid; align-content: end; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.notification-controls .notification-toggle { display: flex; flex-direction: row; align-items: center; align-content: center; }
+.notification-controls input[type="text"], .notification-controls input[type="number"] { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; color: var(--ink); background: var(--surface-solid); }
+.notification-status { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 13px; font-size: 12px; }
+.notification-status h3 { margin: 0 0 8px; font-size: 12px; }
+.notification-status p, .notification-status ul { margin: 6px 0; color: var(--muted); line-height: 1.55; }
+.notification-status article { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.notification-status article strong, .notification-status article time { display: block; }
+.notification-status article time { color: var(--muted); font-size: 10px; }
 .menu-bar-settings h2 { margin: 0; font-size: 20px; }
 .menu-bar-settings > div:first-child > p:not(.eyebrow) { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .menu-bar-controls { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 12px; }
@@ -168,6 +181,7 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
   .quota-heading { flex-direction: column; }
   .quota-grid { grid-template-columns: 1fr; }
   .token-filters, .token-counts, .token-tables { grid-template-columns: 1fr; }
+  .notification-controls { grid-template-columns: 1fr; }
   .settings-card select { width: 100%; }
 }
 
