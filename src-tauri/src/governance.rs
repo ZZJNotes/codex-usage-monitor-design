@@ -18,7 +18,6 @@ pub enum ExportFormat {
 #[serde(rename_all = "camelCase")]
 pub struct ExportArtifact {
     pub filename: String,
-    pub mime_type: String,
     pub content: String,
 }
 
@@ -218,13 +217,11 @@ impl DataGovernanceService {
         match format {
             ExportFormat::Json => Ok(ExportArtifact {
                 filename: format!("codex-usage-{date}.json"),
-                mime_type: "application/json".to_string(),
                 content: serde_json::to_string_pretty(&export)
                     .map_err(|error| error.to_string())?,
             }),
             ExportFormat::Csv => Ok(ExportArtifact {
                 filename: format!("codex-usage-{date}.csv"),
-                mime_type: "text/csv;charset=utf-8".to_string(),
                 content: safe_export_csv(&export),
             }),
         }
