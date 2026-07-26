@@ -41,7 +41,12 @@ beforeEach(() => {
     },
   };
   invoke.mockReset();
-  invoke.mockImplementation((command: string) => {
+  invoke.mockImplementation((command: string, args?: unknown) => {
+    if (command === "set_menu_bar_preferences") {
+      const menuBar = (args as { menuBar: unknown }).menuBar;
+      preferencesResponse = { ...preferencesResponse, menuBar };
+      return Promise.resolve(preferencesResponse);
+    }
     if (command === "get_lifecycle_preferences") {
       return Promise.resolve(preferencesResponse);
     }
@@ -146,6 +151,29 @@ test("configures an ordered limited menu bar without inventing managed account m
     },
   }));
   expect(screen.getByText(/键盘操作/)).toBeVisible();
+});
+
+test("keeps a disappeared quota window configurable so it can be removed", async () => {
+  preferencesResponse = {
+    ...preferencesResponse,
+    menuBar: {
+      parameterIds: ["quotaWindow:retired window", "cpu"],
+      displayLimit: 2,
+      pinnedAccountId: null,
+    },
+  };
+  render(<App />);
+
+  const retired = await screen.findByRole("checkbox", { name: "retired window (不可用)" });
+  expect(retired).toBeChecked();
+  fireEvent.click(retired);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_menu_bar_preferences", {
+    menuBar: {
+      parameterIds: ["cpu"],
+      displayLimit: 2,
+      pinnedAccountId: null,
+    },
+  }));
 });
 
 test("gives storage-specific recovery instead of blaming Codex authentication", async () => {

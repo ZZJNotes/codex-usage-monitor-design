@@ -381,6 +381,17 @@ export function App() {
             : quotaView.error === "invalidResponse"
               ? t("quotaCompatibilityRecovery")
               : t("quotaRecovery");
+  const currentQuotaOptions: Array<{ id: MenuBarParameterId; label: string }> = quotaSnapshot?.windows.map((window) => ({
+    id: `quotaWindow:${window.name}` as const,
+    label: window.name,
+  })) ?? [];
+  const currentQuotaIds = new Set(currentQuotaOptions.map((option) => option.id));
+  const unavailableQuotaOptions: Array<{ id: MenuBarParameterId; label: string }> = preferences.menuBar.parameterIds
+    .filter((id): id is `quotaWindow:${string}` => id.startsWith("quotaWindow:") && !currentQuotaIds.has(id))
+    .map((id) => ({
+      id,
+      label: `${id.replace("quotaWindow:", "")} (${t("unavailable")})`,
+    }));
   const menuBarOptions: Array<{ id: MenuBarParameterId; label: string }> = [
     { id: "cpu", label: t("cpu") },
     { id: "memoryPressure", label: t("memory") },
@@ -388,7 +399,8 @@ export function App() {
     { id: "networkDown", label: t("network") },
     { id: "battery", label: t("battery") },
     { id: "uptime", label: t("uptime") },
-    ...(quotaSnapshot?.windows.map((window) => ({ id: `quotaWindow:${window.name}` as const, label: window.name })) ?? []),
+    ...currentQuotaOptions,
+    ...unavailableQuotaOptions,
   ];
   const optionLabels = new Map(menuBarOptions.map((option) => [option.id, option.label]));
   const pinnedAccountUnavailable = preferences.menuBar.pinnedAccountId != null

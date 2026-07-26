@@ -7,14 +7,15 @@ use tauri::{
 
 use crate::{
     AppState,
-    lifecycle::{LifecyclePreferences, Locale},
+    lifecycle::LifecyclePreferences,
     show_main_window,
-    tray_view::{build_tray_view, pinned_quota_available},
+    tray_view::{build_tray_view, pinned_quota_available, tray_copy},
 };
 
 pub(crate) struct TrayMenuItems {
     status: MenuItem<tauri::Wry>,
     updated: MenuItem<tauri::Wry>,
+    reset: MenuItem<tauri::Wry>,
     refresh: MenuItem<tauri::Wry>,
     open: MenuItem<tauri::Wry>,
     pause: MenuItem<tauri::Wry>,
@@ -22,33 +23,24 @@ pub(crate) struct TrayMenuItems {
 }
 
 fn actions(
-    locale: Locale,
+    preferences: &LifecyclePreferences,
     paused: bool,
     pinned: bool,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
-    match (locale, paused, pinned) {
-        (Locale::ZhCn, false, false) => ("刷新当前账户", "打开仪表盘", "暂停监控", "退出"),
-        (Locale::ZhCn, false, true) => ("刷新置顶账户", "打开仪表盘", "暂停监控", "退出"),
-        (Locale::ZhCn, true, _) => ("刷新额度", "打开仪表盘", "恢复监控", "退出"),
-        (Locale::En, false, false) => (
-            "Refresh current account",
-            "Open dashboard",
-            "Pause monitoring",
-            "Quit",
-        ),
-        (Locale::En, false, true) => (
-            "Refresh pinned account",
-            "Open dashboard",
-            "Pause monitoring",
-            "Quit",
-        ),
-        (Locale::En, true, _) => (
-            "Refresh quota",
-            "Open dashboard",
-            "Resume monitoring",
-            "Quit",
-        ),
-    }
+    let copy = tray_copy(preferences.locale);
+    let refresh = if paused {
+        copy.refresh_generic
+    } else if pinned {
+        copy.refresh_pinned
+    } else {
+        copy.refresh_current
+    };
+    (
+        refresh,
+        copy.open,
+        if paused { copy.resume } else { copy.pause },
+        copy.quit,
+    )
 }
 
 fn os_locale() -> String {
@@ -62,10 +54,10 @@ pub(crate) fn update_tray(app: &AppHandle, items: &TrayMenuItems) {
     let quota = state.quota.latest();
     let view = build_tray_view(&preferences, &health, &quota, &os_locale());
     let pinned = preferences.menu_bar.pinned_account_id.is_some();
-    let (refresh, open, pause, quit) =
-        actions(preferences.locale, preferences.monitoring_paused, pinned);
+    let (refresh, open, pause, quit) = actions(&preferences, preferences.monitoring_paused, pinned);
     let _ = items.status.set_text(&view.status);
     let _ = items.updated.set_text(&view.updated);
+    let _ = items.reset.set_text(&view.reset);
     let _ = items.refresh.set_text(refresh);
     let _ = items.refresh.set_enabled(
         !preferences.monitoring_paused && pinned_quota_available(&preferences, &quota),
@@ -75,11 +67,7 @@ pub(crate) fn update_tray(app: &AppHandle, items: &TrayMenuItems) {
     let _ = items.quit.set_text(quit);
     if let Some(tray_icon) = app.tray_by_id("main-tray") {
         let _ = tray_icon.set_title(Some(&view.title));
-        let _ = tray_icon.set_tooltip(Some(if preferences.locale == Locale::ZhCn {
-            "Codex 用量监控"
-        } else {
-            "Codex Usage Monitor"
-        }));
+        let _ = tray_icon.set_tooltip(Some(tray_copy(preferences.locale).tooltip));
     }
 }
 
@@ -95,9 +83,10 @@ pub(crate) fn setup_tray(
     );
     let pinned = preferences.menu_bar.pinned_account_id.is_some();
     let (refresh_text, open_text, pause_text, quit_text) =
-        actions(preferences.locale, preferences.monitoring_paused, pinned);
+        actions(preferences, preferences.monitoring_paused, pinned);
     let status = MenuItem::with_id(app, "summary-status", view.status, false, None::<&str>)?;
     let updated = MenuItem::with_id(app, "summary-updated", view.updated, false, None::<&str>)?;
+    let reset = MenuItem::with_id(app, "summary-reset", view.reset, false, None::<&str>)?;
     let refresh = MenuItem::with_id(
         app,
         "refresh-quota",
@@ -112,7 +101,7 @@ pub(crate) fn setup_tray(
     let menu = Menu::with_items(
         app,
         &[
-            &status, &updated, &separator, &refresh, &open, &pause, &separator, &quit,
+            &status, &updated, &reset, &separator, &refresh, &open, &pause, &separator, &quit,
         ],
     )?;
     let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
@@ -121,11 +110,7 @@ pub(crate) fn setup_tray(
         .icon(icon)
         .icon_as_template(false)
         .title(&view.title)
-        .tooltip(if preferences.locale == Locale::ZhCn {
-            "Codex 用量监控"
-        } else {
-            "Codex Usage Monitor"
-        })
+        .tooltip(tray_copy(preferences.locale).tooltip)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "refresh-quota" => {
@@ -157,6 +142,7 @@ pub(crate) fn setup_tray(
     Ok(TrayMenuItems {
         status,
         updated,
+        reset,
         refresh,
         open,
         pause,

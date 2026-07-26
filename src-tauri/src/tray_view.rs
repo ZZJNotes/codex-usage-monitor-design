@@ -11,12 +11,133 @@ pub(crate) struct TrayView {
     pub(crate) title: String,
     pub(crate) status: String,
     pub(crate) updated: String,
+    pub(crate) reset: String,
 }
 
-#[derive(Clone, Copy)]
-enum ParameterSource {
-    System,
-    Quota,
+pub(crate) struct TrayCopy {
+    pub(crate) refresh_current: &'static str,
+    pub(crate) refresh_pinned: &'static str,
+    pub(crate) refresh_generic: &'static str,
+    pub(crate) open: &'static str,
+    pub(crate) pause: &'static str,
+    pub(crate) resume: &'static str,
+    pub(crate) quit: &'static str,
+    pub(crate) tooltip: &'static str,
+    default_title: &'static str,
+    memory: &'static str,
+    disk: &'static str,
+    battery: &'static str,
+    uptime: &'static str,
+    left: &'static str,
+    pressure_normal: &'static str,
+    pressure_warning: &'static str,
+    pressure_critical: &'static str,
+    system_paused: &'static str,
+    system_loading: &'static str,
+    system_fresh: &'static str,
+    system_stale: &'static str,
+    system_error: &'static str,
+    quota_paused: &'static str,
+    quota_loading: &'static str,
+    quota_fresh: &'static str,
+    quota_stale: &'static str,
+    quota_error: &'static str,
+    pinned_unavailable: &'static str,
+    cooldown_until: &'static str,
+    status_prefix: &'static str,
+    system_updated: &'static str,
+    quota_updated: &'static str,
+    updated_unavailable: &'static str,
+    reset_prefix: &'static str,
+    reset_unavailable: &'static str,
+    no_quota_selected: &'static str,
+    no_parameters: &'static str,
+    separator: &'static str,
+}
+
+pub(crate) fn tray_copy(locale: Locale) -> TrayCopy {
+    match locale {
+        Locale::ZhCn => TrayCopy {
+            refresh_current: "刷新当前账户",
+            refresh_pinned: "刷新置顶账户",
+            refresh_generic: "刷新额度",
+            open: "打开仪表盘",
+            pause: "暂停监控",
+            resume: "恢复监控",
+            quit: "退出",
+            tooltip: "Codex 用量监控",
+            default_title: "Codex 用量",
+            memory: "内存",
+            disk: "磁盘",
+            battery: "电量",
+            uptime: "运行",
+            left: "剩余",
+            pressure_normal: "正常",
+            pressure_warning: "偏高",
+            pressure_critical: "严重",
+            system_paused: "系统已暂停",
+            system_loading: "系统读取中",
+            system_fresh: "系统正常",
+            system_stale: "系统已过期",
+            system_error: "系统错误",
+            quota_paused: "额度已暂停",
+            quota_loading: "额度读取中",
+            quota_fresh: "额度最新",
+            quota_stale: "额度已过期（可信快照）",
+            quota_error: "额度错误",
+            pinned_unavailable: "置顶账户不可用",
+            cooldown_until: "刷新冷却至",
+            status_prefix: "状态：",
+            system_updated: "系统更新",
+            quota_updated: "额度更新",
+            updated_unavailable: "更新时间：暂无",
+            reset_prefix: "额度重置：",
+            reset_unavailable: "不可用",
+            no_quota_selected: "未选择额度参数",
+            no_parameters: "未选择参数",
+            separator: "；",
+        },
+        Locale::En => TrayCopy {
+            refresh_current: "Refresh current account",
+            refresh_pinned: "Refresh pinned account",
+            refresh_generic: "Refresh quota",
+            open: "Open dashboard",
+            pause: "Pause monitoring",
+            resume: "Resume monitoring",
+            quit: "Quit",
+            tooltip: "Codex Usage Monitor",
+            default_title: "Codex usage",
+            memory: "Memory",
+            disk: "Disk",
+            battery: "Battery",
+            uptime: "Up",
+            left: "left",
+            pressure_normal: "normal",
+            pressure_warning: "high",
+            pressure_critical: "critical",
+            system_paused: "system paused",
+            system_loading: "system loading",
+            system_fresh: "system fresh",
+            system_stale: "system stale",
+            system_error: "system error",
+            quota_paused: "quota paused",
+            quota_loading: "quota loading",
+            quota_fresh: "quota fresh",
+            quota_stale: "quota stale (trusted snapshot)",
+            quota_error: "quota error",
+            pinned_unavailable: "pinned account unavailable",
+            cooldown_until: "refresh cooldown until",
+            status_prefix: "Status: ",
+            system_updated: "System updated",
+            quota_updated: "Quota updated",
+            updated_unavailable: "Updated: unavailable",
+            reset_prefix: "Quota reset: ",
+            reset_unavailable: "unavailable",
+            no_quota_selected: "no quota parameter selected",
+            no_parameters: "no parameters selected",
+            separator: "; ",
+        },
+    }
 }
 
 pub(crate) fn pinned_quota_available(
@@ -99,123 +220,61 @@ fn format_time(time: DateTime<Utc>, os_locale: &str) -> String {
 
 fn parameter_text(
     parameter: &MenuBarParameter,
-    locale: Locale,
+    copy: &TrayCopy,
     os_locale: &str,
     metrics: Option<&SystemHealthMetrics>,
     snapshot: Option<&QuotaSnapshot>,
-) -> Option<(String, ParameterSource)> {
-    let zh = locale == Locale::ZhCn;
-    let system = |text| Some((text, ParameterSource::System));
+) -> Option<String> {
     match parameter {
-        MenuBarParameter::Cpu => metrics.and_then(|m| {
-            system(format!(
+        MenuBarParameter::Cpu => metrics.map(|m| {
+            format!(
                 "CPU {}%",
                 format_number(f64::from(m.cpu_percent), 0, os_locale)
-            ))
+            )
         }),
-        MenuBarParameter::MemoryPressure => metrics.and_then(|m| {
-            let state = match (zh, m.memory_pressure.as_str()) {
-                (true, "normal") => "正常",
-                (true, "warning") => "偏高",
-                (true, _) => "严重",
-                (false, "normal") => "normal",
-                (false, "warning") => "high",
-                (false, _) => "critical",
+        MenuBarParameter::MemoryPressure => metrics.map(|m| {
+            let state = match m.memory_pressure.as_str() {
+                "normal" => copy.pressure_normal,
+                "warning" => copy.pressure_warning,
+                _ => copy.pressure_critical,
             };
-            system(format!("{} {state}", if zh { "内存" } else { "Memory" }))
+            format!("{} {state}", copy.memory)
         }),
-        MenuBarParameter::DiskAvailable => metrics.and_then(|m| {
-            system(format!(
+        MenuBarParameter::DiskAvailable => metrics.map(|m| {
+            format!(
                 "{} {} GB",
-                if zh { "磁盘" } else { "Disk" },
+                copy.disk,
                 format_number(
                     m.disk_available_bytes as f64 / 1_000_000_000.0,
                     0,
                     os_locale
                 )
-            ))
+            )
         }),
-        MenuBarParameter::NetworkDown => metrics.and_then(|m| {
-            system(format!(
+        MenuBarParameter::NetworkDown => metrics.map(|m| {
+            format!(
                 "↓ {} MB/s",
                 format_number(m.network_down_bytes_per_second / 1_000_000.0, 1, os_locale)
-            ))
+            )
         }),
-        MenuBarParameter::Battery => metrics.and_then(|m| m.battery_percent).and_then(|value| {
-            system(format!(
+        MenuBarParameter::Battery => metrics.and_then(|m| m.battery_percent).map(|value| {
+            format!(
                 "{} {}%",
-                if zh { "电量" } else { "Battery" },
+                copy.battery,
                 format_number(f64::from(value), 0, os_locale)
-            ))
+            )
         }),
-        MenuBarParameter::Uptime => metrics.and_then(|m| {
-            system(format!(
-                "{} {} h",
-                if zh { "运行" } else { "Up" },
-                m.uptime_seconds / 3_600
-            ))
-        }),
-        MenuBarParameter::QuotaWindow(window_name) => snapshot.and_then(|snapshot| {
-            snapshot
-                .windows
-                .iter()
-                .find(|window| window.name == *window_name)
-                .map(|window| {
-                    (
-                        format!(
-                            "{} {}% {}",
-                            window.name,
-                            window.remaining_percent,
-                            if zh { "剩余" } else { "left" }
-                        ),
-                        ParameterSource::Quota,
-                    )
-                })
-        }),
-    }
-}
-
-fn system_status(
-    locale: Locale,
-    paused: bool,
-    health: &SystemHealthState,
-) -> (&'static str, Option<DateTime<Utc>>) {
-    let zh = locale == Locale::ZhCn;
-    if paused {
-        return (
-            if zh {
-                "系统已暂停"
-            } else {
-                "system paused"
-            },
-            health_time(health),
-        );
-    }
-    match health {
-        SystemHealthState::Loading => (
-            if zh {
-                "系统读取中"
-            } else {
-                "system loading"
-            },
-            None,
-        ),
-        SystemHealthState::Ready { updated_at, .. } => (
-            if zh { "系统正常" } else { "system fresh" },
-            Some(*updated_at),
-        ),
-        SystemHealthState::Stale { updated_at, .. } => (
-            if zh {
-                "系统已过期"
-            } else {
-                "system stale"
-            },
-            Some(*updated_at),
-        ),
-        SystemHealthState::Error { updated_at, .. } => (
-            if zh { "系统错误" } else { "system error" },
-            Some(*updated_at),
-        ),
+        MenuBarParameter::Uptime => {
+            metrics.map(|m| format!("{} {} h", copy.uptime, m.uptime_seconds / 3_600))
+        }
+        MenuBarParameter::QuotaWindow(name) => snapshot
+            .and_then(|snapshot| snapshot.windows.iter().find(|window| window.name == *name))
+            .map(|window| {
+                format!(
+                    "{} {}% {}",
+                    window.name, window.remaining_percent, copy.left
+                )
+            }),
     }
 }
 
@@ -228,118 +287,115 @@ fn health_time(health: &SystemHealthState) -> Option<DateTime<Utc>> {
     }
 }
 
+fn system_status<'a>(
+    copy: &'a TrayCopy,
+    paused: bool,
+    health: &SystemHealthState,
+) -> (&'a str, Option<DateTime<Utc>>) {
+    if paused {
+        return (copy.system_paused, health_time(health));
+    }
+    match health {
+        SystemHealthState::Loading => (copy.system_loading, None),
+        SystemHealthState::Ready { updated_at, .. } => (copy.system_fresh, Some(*updated_at)),
+        SystemHealthState::Stale { updated_at, .. } => (copy.system_stale, Some(*updated_at)),
+        SystemHealthState::Error { updated_at, .. } => (copy.system_error, Some(*updated_at)),
+    }
+}
+
 fn quota_status(
     preferences: &LifecyclePreferences,
     quota: &QuotaState,
+    copy: &TrayCopy,
     os_locale: &str,
 ) -> (String, Option<DateTime<Utc>>) {
-    let zh = preferences.locale == Locale::ZhCn;
     if preferences.menu_bar.pinned_account_id.is_some()
         && visible_snapshot(preferences, quota).is_none()
     {
-        return (
-            if zh {
-                "置顶账户不可用"
-            } else {
-                "pinned account unavailable"
-            }
-            .into(),
-            None,
-        );
+        return (copy.pinned_unavailable.into(), None);
     }
     if preferences.monitoring_paused {
         return (
-            if zh {
-                "额度已暂停"
-            } else {
-                "quota paused"
-            }
-            .into(),
+            copy.quota_paused.into(),
             visible_snapshot(preferences, quota).map(|snapshot| snapshot.updated_at),
         );
     }
     match quota {
-        QuotaState::Loading => (
-            if zh {
-                "额度读取中"
-            } else {
-                "quota loading"
-            }
-            .into(),
-            None,
-        ),
-        QuotaState::Ready { snapshot, .. } => (
-            if zh { "额度最新" } else { "quota fresh" }.into(),
-            Some(snapshot.updated_at),
-        ),
-        QuotaState::Stale { snapshot, .. } => (
-            if zh {
-                "额度已过期（可信快照）"
-            } else {
-                "quota stale (trusted snapshot)"
-            }
-            .into(),
-            Some(snapshot.updated_at),
-        ),
+        QuotaState::Loading => (copy.quota_loading.into(), None),
+        QuotaState::Ready { snapshot, .. } => (copy.quota_fresh.into(), Some(snapshot.updated_at)),
+        QuotaState::Stale { snapshot, .. } => (copy.quota_stale.into(), Some(snapshot.updated_at)),
         QuotaState::Cooldown { snapshot, retry_at } => (
             format!(
                 "{} {}",
-                if zh {
-                    "刷新冷却至"
-                } else {
-                    "refresh cooldown until"
-                },
+                copy.cooldown_until,
                 format_time(*retry_at, os_locale)
             ),
             snapshot.as_ref().map(|snapshot| snapshot.updated_at),
         ),
         QuotaState::Error { last_snapshot, .. } => (
-            if zh { "额度错误" } else { "quota error" }.into(),
+            copy.quota_error.into(),
             last_snapshot.as_ref().map(|snapshot| snapshot.updated_at),
         ),
-    }
-}
-
-fn title_or_default(title: String, zh: bool) -> String {
-    if title.is_empty() {
-        if zh { "Codex 用量" } else { "Codex usage" }.into()
-    } else {
-        title
     }
 }
 
 fn format_updated(
     system_time: Option<DateTime<Utc>>,
     quota_time: Option<DateTime<Utc>>,
-    locale: Locale,
+    copy: &TrayCopy,
     os_locale: &str,
 ) -> String {
-    let zh = locale == Locale::ZhCn;
     let mut parts = Vec::new();
     if let Some(time) = system_time {
         parts.push(format!(
             "{} {}",
-            if zh { "系统更新" } else { "System updated" },
+            copy.system_updated,
             format_datetime(time, os_locale)
         ));
     }
     if let Some(time) = quota_time {
         parts.push(format!(
             "{} {}",
-            if zh { "额度更新" } else { "Quota updated" },
+            copy.quota_updated,
             format_datetime(time, os_locale)
         ));
     }
     if parts.is_empty() {
-        if zh {
-            "更新时间：暂无"
-        } else {
-            "Updated: unavailable"
-        }
-        .into()
+        copy.updated_unavailable.into()
     } else {
-        parts.join(if zh { "；" } else { "; " })
+        parts.join(copy.separator)
     }
+}
+
+fn format_resets(
+    selected: &[&MenuBarParameter],
+    snapshot: Option<&QuotaSnapshot>,
+    copy: &TrayCopy,
+    os_locale: &str,
+) -> String {
+    let quota_names = selected
+        .iter()
+        .filter_map(|parameter| match parameter {
+            MenuBarParameter::QuotaWindow(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if quota_names.is_empty() {
+        return format!("{}{}", copy.reset_prefix, copy.no_quota_selected);
+    }
+    let resets = quota_names
+        .into_iter()
+        .map(|name| {
+            let value = snapshot
+                .and_then(|snapshot| snapshot.windows.iter().find(|window| window.name == *name))
+                .and_then(|window| window.resets_at)
+                .map(|time| format_datetime(time, os_locale))
+                .unwrap_or_else(|| copy.reset_unavailable.into());
+            format!("{name} {value}")
+        })
+        .collect::<Vec<_>>()
+        .join(copy.separator);
+    format!("{}{resets}", copy.reset_prefix)
 }
 
 pub(crate) fn build_tray_view(
@@ -348,79 +404,69 @@ pub(crate) fn build_tray_view(
     quota: &QuotaState,
     os_locale: &str,
 ) -> TrayView {
+    let copy = tray_copy(preferences.locale);
     let snapshot = visible_snapshot(preferences, quota);
     let selected = preferences
         .menu_bar
         .parameter_ids
         .iter()
-        .take(preferences.menu_bar.display_limit.into());
-    let mut title_parts = Vec::new();
-    let mut has_system = false;
-    let mut has_quota = false;
-    for parameter in selected {
-        match parameter {
-            MenuBarParameter::QuotaWindow(_) => has_quota = true,
-            _ => has_system = true,
-        }
-        if let Some((text, source)) = parameter_text(
-            parameter,
-            preferences.locale,
-            os_locale,
-            current_metrics(health),
-            snapshot,
-        ) {
-            match source {
-                ParameterSource::System => has_system = true,
-                ParameterSource::Quota => has_quota = true,
-            }
-            title_parts.push(text);
-        }
-    }
-    let zh = preferences.locale == Locale::ZhCn;
+        .collect::<Vec<_>>();
+    let has_system = selected
+        .iter()
+        .any(|parameter| !matches!(parameter, MenuBarParameter::QuotaWindow(_)));
+    let has_quota = selected
+        .iter()
+        .any(|parameter| matches!(parameter, MenuBarParameter::QuotaWindow(_)));
+    let title = selected
+        .iter()
+        .filter_map(|parameter| {
+            parameter_text(
+                parameter,
+                &copy,
+                os_locale,
+                current_metrics(health),
+                snapshot,
+            )
+        })
+        .take(preferences.menu_bar.display_limit.into())
+        .collect::<Vec<_>>()
+        .join(" · ");
     let mut statuses = Vec::new();
     let mut system_time = None;
     let mut quota_time = None;
     if has_system {
-        let (status, time) =
-            system_status(preferences.locale, preferences.monitoring_paused, health);
+        let (status, time) = system_status(&copy, preferences.monitoring_paused, health);
         statuses.push(status.to_string());
         system_time = time;
     }
     if has_quota {
-        let (status, time) = quota_status(preferences, quota, os_locale);
+        let (status, time) = quota_status(preferences, quota, &copy, os_locale);
         statuses.push(status);
         quota_time = time;
     }
     if statuses.is_empty() {
-        statuses.push(
-            if zh {
-                "未选择参数"
-            } else {
-                "no parameters selected"
-            }
-            .into(),
-        );
+        statuses.push(copy.no_parameters.into());
     }
     TrayView {
-        title: title_or_default(title_parts.join(" · "), zh),
-        status: format!(
-            "{}{}",
-            if zh { "状态：" } else { "Status: " },
-            statuses.join(if zh { "；" } else { "; " })
-        ),
-        updated: format_updated(system_time, quota_time, preferences.locale, os_locale),
+        title: if title.is_empty() {
+            copy.default_title.into()
+        } else {
+            title
+        },
+        status: format!("{}{}", copy.status_prefix, statuses.join(copy.separator)),
+        updated: format_updated(system_time, quota_time, &copy, os_locale),
+        reset: format_resets(&selected, snapshot, &copy, os_locale),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
     use crate::{
         lifecycle::MenuBarPreferences,
         quota::{QuotaAccount, QuotaWindow},
     };
+    use chrono::TimeZone;
 
     fn snapshot(account_id: &str) -> QuotaSnapshot {
         QuotaSnapshot {
@@ -432,13 +478,12 @@ mod tests {
             windows: vec![QuotaWindow {
                 name: "5 hours".into(),
                 remaining_percent: 72,
-                resets_at: None,
+                resets_at: Some(Utc.with_ymd_and_hms(2026, 7, 27, 3, 0, 0).unwrap()),
                 window_duration_minutes: Some(300),
             }],
             updated_at: Utc.with_ymd_and_hms(2026, 7, 27, 2, 3, 0).unwrap(),
         }
     }
-
     fn health() -> SystemHealthState {
         SystemHealthState::Ready {
             updated_at: Utc.with_ymd_and_hms(2026, 7, 27, 2, 2, 0).unwrap(),
@@ -459,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_limit_values_units_and_quota_status_are_visible() {
+    fn ordered_values_reset_time_and_os_locale_are_visible() {
         let preferences = LifecyclePreferences {
             locale: Locale::En,
             menu_bar: MenuBarPreferences {
@@ -477,34 +522,29 @@ mod tests {
             snapshot: snapshot("account-1"),
             next_refresh_at: Utc::now(),
         };
-
         let view = build_tray_view(&preferences, &health(), &quota, "de-DE");
-
         assert_eq!(view.title, "5 hours 72% left · ↓ 1,5 MB/s");
         assert_eq!(view.status, "Status: system fresh; quota fresh");
-        assert!(view.updated.contains("Quota updated"));
-        assert!(!view.updated.contains("UTC"));
+        assert!(view.reset.starts_with("Quota reset: 5 hours "));
+        assert!(!view.reset.contains("UTC"));
     }
 
     #[test]
-    fn system_only_parameters_use_health_status_and_health_update_time() {
-        let preferences = LifecyclePreferences::default();
+    fn system_only_parameters_use_health_state_and_time() {
         let quota = QuotaState::Error {
             reason: crate::quota::QuotaErrorReason::Transport,
             last_snapshot: None,
             failed_at: Utc::now(),
             retry_at: None,
         };
-
-        let view = build_tray_view(&preferences, &health(), &quota, "zh-CN");
-
+        let view = build_tray_view(&LifecyclePreferences::default(), &health(), &quota, "zh-CN");
         assert_eq!(view.status, "状态：系统正常");
         assert!(view.updated.starts_with("系统更新"));
         assert!(!view.updated.contains("额度"));
     }
 
     #[test]
-    fn another_current_account_never_supplies_pinned_quota() {
+    fn another_account_never_supplies_pinned_quota_or_refresh() {
         let preferences = LifecyclePreferences {
             menu_bar: MenuBarPreferences {
                 parameter_ids: vec![
@@ -520,16 +560,14 @@ mod tests {
             snapshot: snapshot("current-account"),
             next_refresh_at: Utc::now(),
         };
-
         let view = build_tray_view(&preferences, &health(), &quota, "zh-CN");
-
         assert_eq!(view.title, "CPU 12%");
         assert_eq!(view.status, "状态：系统正常；置顶账户不可用");
         assert!(!pinned_quota_available(&preferences, &quota));
     }
 
     #[test]
-    fn lightweight_panel_names_manual_cooldown_in_os_local_time() {
+    fn panel_names_manual_cooldown_in_os_local_time() {
         let preferences = LifecyclePreferences {
             locale: Locale::En,
             menu_bar: MenuBarPreferences {
@@ -543,11 +581,35 @@ mod tests {
             snapshot: Some(snapshot("account-1")),
             retry_at: Utc.with_ymd_and_hms(2026, 7, 27, 2, 4, 30).unwrap(),
         };
-
         let view = build_tray_view(&preferences, &health(), &quota, "en-US");
-
         assert!(view.status.contains("refresh cooldown until"));
         assert!(view.status.contains("AM") || view.status.contains("PM"));
         assert!(!view.status.contains("UTC"));
+    }
+
+    #[test]
+    fn an_unavailable_window_does_not_consume_the_visible_parameter_limit() {
+        let preferences = LifecyclePreferences {
+            locale: Locale::En,
+            menu_bar: MenuBarPreferences {
+                parameter_ids: vec![
+                    MenuBarParameter::QuotaWindow("retired".into()),
+                    MenuBarParameter::Cpu,
+                    MenuBarParameter::NetworkDown,
+                ],
+                display_limit: 2,
+                pinned_account_id: None,
+            },
+            ..LifecyclePreferences::default()
+        };
+        let quota = QuotaState::Ready {
+            snapshot: snapshot("account-1"),
+            next_refresh_at: Utc::now(),
+        };
+
+        let view = build_tray_view(&preferences, &health(), &quota, "en-US");
+
+        assert_eq!(view.title, "CPU 12% · ↓ 1.5 MB/s");
+        assert!(view.reset.contains("retired unavailable"));
     }
 }
