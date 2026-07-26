@@ -61,3 +61,37 @@ export type QuotaState =
   | { status: "loading" }
   | { status: "ready"; snapshot: QuotaSnapshot }
   | { status: "error"; message: string; lastSnapshot: QuotaSnapshot | null };
+
+export type TokenCounts = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+};
+
+export type TokenUsageFilters = {
+  startAt?: string;
+  endAt?: string;
+  model?: string;
+  sessionId?: string;
+};
+
+export type TokenUsageData = {
+  totals: TokenCounts;
+  models: Array<{ model: string; counts: TokenCounts }>;
+  sessions: Array<{
+    sessionId: string;
+    model: string;
+    firstObservedAt: string;
+    lastObservedAt: string;
+    counts: TokenCounts;
+  }>;
+  updatedAt: string;
+};
+
+export type TokenUsageState =
+  | { status: "loading" }
+  | { status: "ready"; data: TokenUsageData }
+  | { status: "error"; message: string; lastData: TokenUsageData | null };

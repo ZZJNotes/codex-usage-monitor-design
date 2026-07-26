@@ -4,6 +4,7 @@ pub mod lifecycle;
 pub mod platform_metrics;
 pub mod quota;
 pub mod system_health;
+pub mod token_usage;
 mod tray;
 
 use std::{
@@ -15,8 +16,8 @@ use std::{
 
 use commands::{
     get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, refresh_quota, refresh_system_health, set_locale,
-    set_monitoring_paused, set_theme, show_dashboard,
+    get_system_health_history, get_token_usage, refresh_quota, refresh_system_health,
+    refresh_token_usage, set_locale, set_monitoring_paused, set_theme, show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
@@ -25,12 +26,14 @@ use quota::{CodexAppServerSource, QuotaService};
 use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{ActivationPolicy, AppHandle, Manager, Runtime, WindowEvent};
+use token_usage::TokenUsageService;
 use tray::setup_tray;
 
 pub(crate) struct AppState {
     pub(crate) health: Arc<SystemHealthService>,
     pub(crate) lifecycle: Arc<LifecycleService>,
     pub(crate) quota: Arc<QuotaService>,
+    pub(crate) token_usage: Arc<TokenUsageService>,
     pub(crate) application_status: Arc<RwLock<ApplicationStatus>>,
 }
 
@@ -64,6 +67,8 @@ pub fn run() {
             refresh_system_health,
             get_quota_state,
             refresh_quota,
+            get_token_usage,
+            refresh_token_usage,
             get_application_status,
             get_lifecycle_preferences,
             set_monitoring_paused,
@@ -92,11 +97,13 @@ pub fn run() {
                 Ok(source) => QuotaService::new(Arc::new(source)),
                 Err(message) => QuotaService::unavailable(message),
             });
+            let token_usage = Arc::new(TokenUsageService::default_roots(database.clone()));
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
             app.manage(AppState {
                 health: health.clone(),
                 lifecycle: lifecycle.clone(),
                 quota: quota.clone(),
+                token_usage: token_usage.clone(),
                 application_status: application_status.clone(),
             });
             let preferences = lifecycle.preferences();
@@ -145,6 +152,15 @@ pub fn run() {
                         quota.refresh();
                     }
                     thread::sleep(Duration::from_secs(600));
+                }
+            });
+            let token_lifecycle = app.state::<AppState>().lifecycle.clone();
+            thread::spawn(move || {
+                loop {
+                    if !token_lifecycle.preferences().monitoring_paused {
+                        let _ = token_usage.scan();
+                    }
+                    thread::sleep(Duration::from_secs(2));
                 }
             });
             Ok(())

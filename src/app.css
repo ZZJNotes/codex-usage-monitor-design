@@ -86,6 +86,29 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
 .quota-card .quota-value { margin-top: 18px; color: var(--ink); font-size: 29px; font-weight: 760; letter-spacing: -0.045em; }
 .quota-state { padding: 22px 0 2px; color: var(--muted); font-size: 13px; }
 
+.token-section { margin-bottom: 18px; padding: 24px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface); box-shadow: var(--shadow); }
+.token-heading h2 { margin: 0; font-size: 25px; letter-spacing: -0.035em; }
+.token-heading p:not(.eyebrow) { max-width: 740px; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.token-filters { margin-top: 20px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto; gap: 10px; align-items: end; }
+.token-filters label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.token-filters input { min-width: 0; width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 8px 9px; color: var(--ink); background: var(--surface-solid); font: inherit; outline-offset: 3px; }
+.token-filters input:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 80%, #315400); }
+.token-filters button { border: 0; border-radius: 9px; padding: 9px 16px; background: var(--accent); color: var(--accent-ink); font-weight: 750; cursor: pointer; }
+.token-semantics { margin: 15px 0; color: var(--muted); font-size: 12px; }
+.token-state { padding: 18px 0 2px; color: var(--muted); font-size: 13px; }
+.token-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.token-count { padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-solid); }
+.token-count--total { background: color-mix(in srgb, var(--accent) 15%, var(--surface-solid)); }
+.token-count h3 { margin: 0; min-height: 28px; color: var(--muted); font-size: 10px; }
+.token-count p { margin: 8px 0 0; font-size: 22px; font-weight: 760; font-variant-numeric: tabular-nums; }
+.token-tables { margin-top: 18px; display: grid; grid-template-columns: minmax(220px, 0.65fr) minmax(420px, 1.35fr); gap: 14px; }
+.token-table-wrap { min-width: 0; overflow-x: auto; }
+.token-table-wrap h3 { margin: 0 0 8px; font-size: 12px; }
+.token-table-wrap table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.token-table-wrap th, .token-table-wrap td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.token-table-wrap th { color: var(--muted); font-weight: 700; }
+.token-table-wrap td { font-variant-numeric: tabular-nums; }
+
 .metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .metric-card { min-height: 200px; padding: 22px; border: 1px solid var(--line); border-radius: 21px; background: var(--surface); box-shadow: var(--shadow); backdrop-filter: blur(16px); }
 .metric-card__header { display: flex; align-items: center; justify-content: space-between; }
@@ -125,6 +148,7 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
   .settings-card { grid-template-columns: 1fr; }
   .quota-heading { flex-direction: column; }
   .quota-grid { grid-template-columns: 1fr; }
+  .token-filters, .token-counts, .token-tables { grid-template-columns: 1fr; }
   .settings-card select { width: 100%; }
 }
 
