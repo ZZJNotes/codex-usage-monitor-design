@@ -71,6 +71,21 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
 .status-pill > span { width: 8px; height: 8px; border-radius: 50%; background: #6bb93d; box-shadow: 0 0 0 4px rgba(107, 185, 61, 0.12); }
 .status-pill--paused > span { background: #ef9c3a; box-shadow: 0 0 0 4px rgba(239, 156, 58, 0.13); }
 
+.quota-section { margin-bottom: 18px; padding: 24px; border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 11%, var(--surface)), var(--surface)); box-shadow: var(--shadow); }
+.quota-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.quota-heading h2 { margin: 0; font-size: 25px; letter-spacing: -0.035em; }
+.quota-heading p:not(.eyebrow) { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.quota-heading button { border: 1px solid var(--line); border-radius: 999px; padding: 9px 14px; background: var(--surface-solid); color: var(--ink); font-weight: 700; cursor: pointer; }
+.quota-heading button:disabled { cursor: not-allowed; opacity: 0.55; }
+.account-line { margin: 20px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 10px 22px; color: var(--muted); font-size: 11px; }
+.account-line strong { color: var(--ink); }
+.quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.quota-card { padding: 17px 18px; border: 1px solid var(--line); border-radius: 16px; background: color-mix(in srgb, var(--surface-solid) 86%, transparent); }
+.quota-card h3 { margin: 0; color: var(--muted); font-size: 11px; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
+.quota-card p { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.quota-card .quota-value { margin-top: 18px; color: var(--ink); font-size: 29px; font-weight: 760; letter-spacing: -0.045em; }
+.quota-state { padding: 22px 0 2px; color: var(--muted); font-size: 13px; }
+
 .metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .metric-card { min-height: 200px; padding: 22px; border: 1px solid var(--line); border-radius: 21px; background: var(--surface); box-shadow: var(--shadow); backdrop-filter: blur(16px); }
 .metric-card__header { display: flex; align-items: center; justify-content: space-between; }
@@ -108,6 +123,8 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
   .page-header { align-items: flex-start; flex-direction: column; }
   .metrics-grid { grid-template-columns: 1fr; }
   .settings-card { grid-template-columns: 1fr; }
+  .quota-heading { flex-direction: column; }
+  .quota-grid { grid-template-columns: 1fr; }
   .settings-card select { width: 100%; }
 }
 

@@ -4,6 +4,7 @@ import type {
   HealthPoint,
   HealthState,
   LifecyclePreferences,
+  QuotaState,
 } from "./types";
 
 export const monitorApi = {
@@ -13,6 +14,8 @@ export const monitorApi = {
     invoke<HealthPoint[]>("get_system_health_history"),
   getApplicationStatus: () =>
     invoke<ApplicationStatus>("get_application_status"),
+  getQuota: () => invoke<QuotaState>("get_quota_state"),
+  refreshQuota: () => invoke<QuotaState>("refresh_quota"),
   getPreferences: () =>
     invoke<LifecyclePreferences>("get_lifecycle_preferences"),
   setPaused: (paused: boolean) =>

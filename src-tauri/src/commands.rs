@@ -4,6 +4,7 @@ use tauri::{AppHandle, State};
 use crate::{
     AppState, ApplicationStatus,
     lifecycle::LifecyclePreferences,
+    quota::QuotaState,
     show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     tray::{TrayMenuItems, update_tray_locale, update_tray_text},
@@ -42,6 +43,29 @@ pub(crate) fn refresh_system_health(state: State<'_, AppState>) -> SystemHealthS
 #[tauri::command]
 pub(crate) fn get_system_health_history(state: State<'_, AppState>) -> Vec<SystemHealthPoint> {
     state.health.history()
+}
+
+#[tauri::command]
+pub(crate) fn get_quota_state(state: State<'_, AppState>) -> QuotaState {
+    state.quota.latest()
+}
+
+#[tauri::command]
+pub(crate) fn refresh_quota(state: State<'_, AppState>) -> QuotaState {
+    if state.lifecycle.preferences().monitoring_paused {
+        return QuotaState::Error {
+            message: "监控已暂停；恢复后才能刷新额度".to_string(),
+            last_snapshot: match state.quota.latest() {
+                QuotaState::Ready { snapshot }
+                | QuotaState::Error {
+                    last_snapshot: Some(snapshot),
+                    ..
+                } => Some(snapshot),
+                _ => None,
+            },
+        };
+    }
+    state.quota.refresh()
 }
 
 #[tauri::command]

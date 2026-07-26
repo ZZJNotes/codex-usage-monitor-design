@@ -25,6 +25,23 @@ beforeEach(() => {
     if (command === "get_system_health_history") {
       return Promise.resolve([]);
     }
+    if (command === "get_quota_state") {
+      return Promise.resolve({
+        status: "ready",
+        snapshot: {
+          account: { displayName: "user@example.com", planType: "plus" },
+          windows: [
+            {
+              name: "codex · primary",
+              remainingPercent: 85,
+              resetsAt: "2026-08-02T12:00:00Z",
+              windowDurationMinutes: 10080,
+            },
+          ],
+          updatedAt: "2026-07-26T12:00:00Z",
+        },
+      });
+    }
     if (command === "get_system_health") {
       return Promise.resolve({
         status: "ready",
@@ -51,9 +68,11 @@ beforeEach(() => {
 test("shows a textual loading state before rendering understandable system metrics", async () => {
   render(<App />);
 
-  expect(screen.getByRole("status")).toHaveTextContent("正在读取系统状态");
+  expect(screen.getByText("正在读取系统状态…")).toBeVisible();
   expect(await screen.findByText("处理器")).toBeVisible();
   expect(screen.getByText("12.5%")).toBeVisible();
   expect(screen.getByText("正常")).toBeVisible();
+  expect(screen.getByText("Codex 额度")).toBeVisible();
+  expect(screen.getByText("85% 剩余")).toBeVisible();
   expect(screen.getByRole("button", { name: "暂停监控" })).toBeEnabled();
 });

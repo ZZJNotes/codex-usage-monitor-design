@@ -43,3 +43,21 @@ export type HealthPoint = {
 export type ApplicationStatus = {
   storageIssue: { detail: string } | null;
 };
+
+export type QuotaWindow = {
+  name: string;
+  remainingPercent: number;
+  resetsAt: string | null;
+  windowDurationMinutes: number | null;
+};
+
+export type QuotaSnapshot = {
+  account: { displayName: string; planType: string };
+  windows: QuotaWindow[];
+  updatedAt: string;
+};
+
+export type QuotaState =
+  | { status: "loading" }
+  | { status: "ready"; snapshot: QuotaSnapshot }
+  | { status: "error"; message: string; lastSnapshot: QuotaSnapshot | null };
