@@ -159,7 +159,14 @@ struct PendingNotification {
 }
 
 #[derive(Clone)]
-enum NotificationActivation {
+struct NotificationActivation {
+    id: NotificationConditionId,
+    condition: ActiveNotificationCondition,
+    effect: NotificationEffect,
+}
+
+#[derive(Clone)]
+enum NotificationEffect {
     Quota {
         account_id: AccountId,
         window_name: String,
@@ -181,72 +188,78 @@ enum NotificationConditionId {
 }
 
 impl NotificationActivation {
-    fn id(&self) -> NotificationConditionId {
-        match self {
-            Self::Quota {
-                account_id,
-                window_name,
-                ..
-            } => NotificationConditionId::Quota(account_id.clone(), window_name.clone()),
-            Self::Authentication(account_id) => {
-                NotificationConditionId::Authentication(account_id.clone())
-            }
-            Self::RefreshExpired(account_id) => {
-                NotificationConditionId::RefreshExpired(account_id.clone())
-            }
-            Self::Disk => NotificationConditionId::Disk,
-            Self::MemoryPressure => NotificationConditionId::MemoryPressure,
-        }
-    }
-
-    fn condition(&self, policy: &NotificationPolicy) -> ActiveNotificationCondition {
-        match self {
-            Self::Quota {
-                account_id,
-                window_name,
-                level,
-            } => ActiveNotificationCondition {
+    fn quota(account_id: AccountId, window_name: String, level: u8) -> Self {
+        Self {
+            id: NotificationConditionId::Quota(account_id.clone(), window_name.clone()),
+            condition: ActiveNotificationCondition {
                 key: format!("quota:{}:{window_name}", account_id.as_str()),
                 kind: NotificationConditionKind::Quota,
                 label: format!("{window_name} ≤ {level}%"),
                 account_id: Some(account_id.clone()),
             },
-            Self::Authentication(account_id) => ActiveNotificationCondition {
+            effect: NotificationEffect::Quota {
+                account_id,
+                window_name,
+                level,
+            },
+        }
+    }
+
+    fn authentication(account_id: AccountId) -> Self {
+        Self {
+            id: NotificationConditionId::Authentication(account_id.clone()),
+            condition: ActiveNotificationCondition {
                 key: format!("authentication:{}", account_id.as_str()),
                 kind: NotificationConditionKind::Authentication,
                 label: "OAuth reauthorization required".into(),
                 account_id: Some(account_id.clone()),
             },
-            Self::RefreshExpired(account_id) => ActiveNotificationCondition {
+            effect: NotificationEffect::Authentication(account_id),
+        }
+    }
+
+    fn refresh_expired(account_id: AccountId, failures: u32) -> Self {
+        Self {
+            id: NotificationConditionId::RefreshExpired(account_id.clone()),
+            condition: ActiveNotificationCondition {
                 key: format!("refresh:{}", account_id.as_str()),
                 kind: NotificationConditionKind::RefreshExpired,
-                label: format!(
-                    "Quota refresh failed {} consecutive times",
-                    policy.consecutive_refresh_failures
-                ),
+                label: format!("Quota refresh failed {failures} consecutive times"),
                 account_id: Some(account_id.clone()),
             },
-            Self::Disk => ActiveNotificationCondition {
+            effect: NotificationEffect::RefreshExpired(account_id),
+        }
+    }
+
+    fn disk(threshold: u8) -> Self {
+        Self {
+            id: NotificationConditionId::Disk,
+            condition: ActiveNotificationCondition {
                 key: "disk".into(),
                 kind: NotificationConditionKind::Disk,
-                label: format!(
-                    "Disk available space ≤ {}%",
-                    policy.disk_available_percent_threshold
-                ),
+                label: format!("Disk available space ≤ {threshold}%"),
                 account_id: None,
             },
-            Self::MemoryPressure => ActiveNotificationCondition {
+            effect: NotificationEffect::Disk,
+        }
+    }
+
+    fn memory_pressure() -> Self {
+        Self {
+            id: NotificationConditionId::MemoryPressure,
+            condition: ActiveNotificationCondition {
                 key: "memoryPressure".into(),
                 kind: NotificationConditionKind::MemoryPressure,
                 label: "Memory pressure is critical".into(),
                 account_id: None,
             },
+            effect: NotificationEffect::MemoryPressure,
         }
     }
 
     fn apply(self, state: &mut PersistedNotificationState) {
-        match self {
-            Self::Quota {
+        match self.effect {
+            NotificationEffect::Quota {
                 account_id,
                 window_name,
                 level,
@@ -257,22 +270,22 @@ impl NotificationActivation {
                     .or_default()
                     .insert(window_name, level);
             }
-            Self::Authentication(account_id) => {
+            NotificationEffect::Authentication(account_id) => {
                 state
                     .accounts
                     .entry(account_id)
                     .or_default()
                     .authentication_active = true;
             }
-            Self::RefreshExpired(account_id) => {
+            NotificationEffect::RefreshExpired(account_id) => {
                 state
                     .accounts
                     .entry(account_id)
                     .or_default()
                     .refresh_expired_active = true;
             }
-            Self::Disk => state.disk_active = true,
-            Self::MemoryPressure => state.memory_active = true,
+            NotificationEffect::Disk => state.disk_active = true,
+            NotificationEffect::MemoryPressure => state.memory_active = true,
         }
     }
 }
@@ -438,7 +451,7 @@ impl NotificationService {
                     if should_notify {
                         pending.push(PendingNotification {
                             notification: authentication_notification(display_name, locale),
-                            activation: NotificationActivation::Authentication(account_id.clone()),
+                            activation: NotificationActivation::authentication(account_id.clone()),
                         });
                     }
                 } else {
@@ -515,7 +528,7 @@ impl NotificationService {
                     policy.disk_available_percent_threshold,
                     locale,
                 ),
-                activation: NotificationActivation::Disk,
+                activation: NotificationActivation::disk(policy.disk_available_percent_threshold),
             });
         } else if !disk_exhausted {
             state.disk_active = false;
@@ -532,7 +545,7 @@ impl NotificationService {
         {
             pending.push(PendingNotification {
                 notification: memory_notification(locale),
-                activation: NotificationActivation::MemoryPressure,
+                activation: NotificationActivation::memory_pressure(),
             });
         } else if !memory_critical {
             state.memory_active = false;
@@ -554,7 +567,7 @@ impl NotificationService {
         let previous_delivery_error = state.status.delivery_error.clone();
         let mut delivery_error = None;
         for pending_notification in pending {
-            let condition_id = pending_notification.activation.id();
+            let condition_id = pending_notification.activation.id.clone();
             match self.sender.send(&pending_notification.notification) {
                 Ok(()) => {
                     pending_notification.activation.apply(state);
@@ -670,7 +683,10 @@ fn queue_refresh_expired_if_needed(
                 account.consecutive_refresh_failures,
                 locale,
             ),
-            activation: NotificationActivation::RefreshExpired(account_id.clone()),
+            activation: NotificationActivation::refresh_expired(
+                account_id.clone(),
+                account.consecutive_refresh_failures,
+            ),
         });
     }
 }
@@ -738,11 +754,11 @@ fn evaluate_quota_windows(
                     window.remaining_percent,
                     locale,
                 ),
-                activation: NotificationActivation::Quota {
-                    account_id: account_id.clone(),
-                    window_name: window.name.clone(),
-                    level: current_level,
-                },
+                activation: NotificationActivation::quota(
+                    account_id.clone(),
+                    window.name.clone(),
+                    current_level,
+                ),
             });
         }
     }
@@ -756,30 +772,31 @@ fn rebuild_active_conditions(state: &mut PersistedNotificationState, policy: &No
     for (account_id, windows) in &state.quota_levels {
         for (window, threshold) in windows {
             conditions.push(
-                NotificationActivation::Quota {
-                    account_id: account_id.clone(),
-                    window_name: window.clone(),
-                    level: *threshold,
-                }
-                .condition(policy),
+                NotificationActivation::quota(account_id.clone(), window.clone(), *threshold)
+                    .condition,
             );
         }
     }
     for (account_id, account) in &state.accounts {
         if account.authentication_active {
-            conditions
-                .push(NotificationActivation::Authentication(account_id.clone()).condition(policy));
+            conditions.push(NotificationActivation::authentication(account_id.clone()).condition);
         }
         if account.refresh_expired_active {
-            conditions
-                .push(NotificationActivation::RefreshExpired(account_id.clone()).condition(policy));
+            conditions.push(
+                NotificationActivation::refresh_expired(
+                    account_id.clone(),
+                    policy.consecutive_refresh_failures,
+                )
+                .condition,
+            );
         }
     }
     if state.disk_active {
-        conditions.push(NotificationActivation::Disk.condition(policy));
+        conditions
+            .push(NotificationActivation::disk(policy.disk_available_percent_threshold).condition);
     }
     if state.memory_active {
-        conditions.push(NotificationActivation::MemoryPressure.condition(policy));
+        conditions.push(NotificationActivation::memory_pressure().condition);
     }
     state.status.active_conditions = conditions;
 }
