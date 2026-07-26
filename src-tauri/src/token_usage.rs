@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Mutex, mpsc::Sender},
+    sync::{Arc, Mutex, mpsc::Sender},
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -20,7 +20,42 @@ pub use parser::{ParseResult, parse_jsonl};
 use parser::{ParsedLine, ParserContext, parse_line};
 #[path = "token_usage/repository.rs"]
 mod repository;
-use repository::{insert_event, query_usage};
+use repository::{
+    insert_event, query_usage, reassign_session, record_account_evidence,
+    record_session_attribution,
+};
+
+pub const UNASSIGNED_ACCOUNT_FILTER: &str = "unassigned";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenAccount {
+    pub account_key: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveAccountEvidence {
+    pub account: TokenAccount,
+    pub source: String,
+    pub observed_at: String,
+}
+
+pub trait AccountEvidenceSource: Send + Sync {
+    fn active_account(&self) -> Option<ActiveAccountEvidence>;
+
+    fn known_accounts(&self) -> Vec<ActiveAccountEvidence> {
+        self.active_account().into_iter().collect()
+    }
+}
+
+struct NoAccountEvidence;
+
+impl AccountEvidenceSource for NoAccountEvidence {
+    fn active_account(&self) -> Option<ActiveAccountEvidence> {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +103,7 @@ pub struct TokenUsageFilters {
     pub end_at: Option<String>,
     pub model: Option<String>,
     pub session_id: Option<String>,
+    pub account_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,6 +121,25 @@ pub struct SessionUsage {
     pub first_observed_at: String,
     pub last_observed_at: String,
     pub counts: TokenCounts,
+    pub assignment: SessionAttribution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttributionSource {
+    ActiveAccount,
+    Unassigned,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAttribution {
+    pub account: Option<TokenAccount>,
+    pub source: AttributionSource,
+    pub assigned_at: String,
+    pub evidence_source: Option<String>,
+    pub evidence_observed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -93,6 +148,7 @@ pub struct TokenUsageData {
     pub totals: TokenCounts,
     pub models: Vec<ModelUsage>,
     pub sessions: Vec<SessionUsage>,
+    pub accounts: Vec<TokenAccount>,
     pub updated_at: String,
 }
 
@@ -157,6 +213,7 @@ struct Checkpoint {
 pub struct TokenUsageService {
     database: Database,
     roots: Vec<PathBuf>,
+    account_evidence: Arc<dyn AccountEvidenceSource>,
     last_data: Mutex<Option<TokenUsageData>>,
     last_scan_error: Mutex<Option<String>>,
     last_scan_at: Mutex<Option<DateTime<Utc>>>,
@@ -164,9 +221,18 @@ pub struct TokenUsageService {
 
 impl TokenUsageService {
     pub fn new(database: Database, roots: Vec<PathBuf>) -> Self {
+        Self::with_account_evidence(database, roots, Arc::new(NoAccountEvidence))
+    }
+
+    pub fn with_account_evidence(
+        database: Database,
+        roots: Vec<PathBuf>,
+        account_evidence: Arc<dyn AccountEvidenceSource>,
+    ) -> Self {
         Self {
             database,
             roots,
+            account_evidence,
             last_data: Mutex::new(None),
             last_scan_error: Mutex::new(None),
             last_scan_at: Mutex::new(None),
@@ -174,16 +240,20 @@ impl TokenUsageService {
     }
 
     pub fn default_roots(database: Database) -> Self {
-        Self::new(database, discover_default_roots())
+        Self::new(database, default_roots())
     }
 
     pub fn scan(&self) -> Result<ImportReport, String> {
         let result = (|| {
+            let active_account = self.account_evidence.active_account();
+            for evidence in self.account_evidence.known_accounts() {
+                record_account_evidence(&self.database, &evidence)?;
+            }
             let mut report = ImportReport::default();
             for root in &self.roots {
                 for path in jsonl_files(root)? {
                     report.scanned_files += 1;
-                    let file_report = self.scan_file(&path)?;
+                    let file_report = self.scan_file(&path, active_account.as_ref())?;
                     report.imported_events += file_report.imported_events;
                     report.malformed_lines += file_report.malformed_lines;
                     report.unknown_events += file_report.unknown_events;
@@ -247,7 +317,23 @@ impl TokenUsageService {
         }
     }
 
-    fn scan_file(&self, path: &Path) -> Result<ImportReport, String> {
+    pub fn reassign_session(
+        &self,
+        session_id: &str,
+        account_key: Option<&str>,
+        assigned_at: &str,
+    ) -> Result<(), String> {
+        if session_id.trim().is_empty() {
+            return Err("session id is required".to_string());
+        }
+        reassign_session(&self.database, session_id, account_key, assigned_at)
+    }
+
+    fn scan_file(
+        &self,
+        path: &Path,
+        active_account: Option<&ActiveAccountEvidence>,
+    ) -> Result<ImportReport, String> {
         let source_key = opaque_hash(&path.to_string_lossy());
         let metadata =
             fs::metadata(path).map_err(|error| redacted_io_error("read session", error))?;
@@ -300,9 +386,13 @@ impl TokenUsageService {
             }
             match parsed {
                 ParsedLine::Event(event) => {
+                    record_session_attribution(&self.database, &event.session_id, active_account)?;
                     if insert_event(&self.database, &source_key, &event)? {
                         report.imported_events += 1;
                     }
+                }
+                ParsedLine::SessionObserved(session_id) => {
+                    record_session_attribution(&self.database, &session_id, active_account)?;
                 }
                 ParsedLine::Known => {}
                 ParsedLine::Unknown => report.unknown_events += 1,
@@ -341,7 +431,7 @@ impl TokenUsageService {
     }
 }
 
-fn discover_default_roots() -> Vec<PathBuf> {
+pub(crate) fn default_roots() -> Vec<PathBuf> {
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
@@ -386,6 +476,13 @@ fn redacted_io_error(action: &str, error: std::io::Error) -> String {
 
 fn opaque_hash(value: &str) -> String {
     hex_digest(value.as_bytes())
+}
+
+pub(crate) fn token_account_key(value: &str) -> String {
+    format!(
+        "acct_{}",
+        &hex_digest(value.trim().to_lowercase().as_bytes())[..16]
+    )
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -470,11 +567,40 @@ fn save_checkpoint(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, io::Write};
+    use std::{fs::OpenOptions, io::Write, sync::RwLock};
 
     use tempfile::tempdir;
 
     use super::*;
+
+    struct FakeAccountEvidence(RwLock<Option<ActiveAccountEvidence>>);
+
+    impl FakeAccountEvidence {
+        fn new(evidence: Option<ActiveAccountEvidence>) -> Self {
+            Self(RwLock::new(evidence))
+        }
+
+        fn set(&self, evidence: Option<ActiveAccountEvidence>) {
+            *self.0.write().unwrap() = evidence;
+        }
+    }
+
+    impl AccountEvidenceSource for FakeAccountEvidence {
+        fn active_account(&self) -> Option<ActiveAccountEvidence> {
+            self.0.read().unwrap().clone()
+        }
+    }
+
+    fn account(key: &str, name: &str, observed_at: &str) -> ActiveAccountEvidence {
+        ActiveAccountEvidence {
+            account: TokenAccount {
+                account_key: key.to_string(),
+                display_name: name.to_string(),
+            },
+            source: "sanitized-test-evidence".to_string(),
+            observed_at: observed_at.to_string(),
+        }
+    }
 
     fn ready(state: TokenUsageState) -> TokenUsageData {
         match state {
@@ -692,5 +818,265 @@ mod tests {
                 reason: TokenUsageStaleReason::Paused,
             }
         ));
+    }
+
+    #[test]
+    fn first_observation_freezes_only_explicit_active_account_evidence() {
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("sessions");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(
+            active.join("first.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-24T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"explicit-session\"}}\n",
+                "{\"timestamp\":\"2026-07-24T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":7,\"output_tokens\":3}}}}\n"
+            ),
+        )
+        .unwrap();
+        let evidence = Arc::new(FakeAccountEvidence::new(Some(account(
+            "acct_a",
+            "Account A",
+            "2026-07-24T00:00:00Z",
+        ))));
+        let service = TokenUsageService::with_account_evidence(
+            Database::in_memory().unwrap(),
+            vec![active.clone()],
+            evidence.clone(),
+        );
+
+        service.scan().unwrap();
+        evidence.set(Some(account("acct_b", "Account B", "2026-07-24T00:01:00Z")));
+        fs::write(
+            active.join("second.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-24T00:01:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"later-session\"}}\n",
+                "{\"timestamp\":\"2026-07-24T00:01:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":5,\"output_tokens\":5}}}}\n"
+            ),
+        )
+        .unwrap();
+        service.scan().unwrap();
+
+        let all = ready(service.query(TokenUsageFilters::default()));
+        let explicit = all
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "explicit-session")
+            .unwrap();
+        let later = all
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "later-session")
+            .unwrap();
+        assert_eq!(
+            explicit.assignment.account.as_ref().unwrap().account_key,
+            "acct_a"
+        );
+        assert_eq!(explicit.assignment.source, AttributionSource::ActiveAccount);
+        assert_eq!(
+            explicit.assignment.evidence_observed_at.as_deref(),
+            Some("2026-07-24T00:00:00Z")
+        );
+        assert_eq!(
+            later.assignment.account.as_ref().unwrap().account_key,
+            "acct_b"
+        );
+    }
+
+    #[test]
+    fn session_metadata_observation_freezes_before_the_first_token_event() {
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("sessions");
+        fs::create_dir_all(&active).unwrap();
+        let path = active.join("metadata-first.jsonl");
+        fs::write(
+            &path,
+            "{\"timestamp\":\"2026-07-24T02:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"metadata-first-session\"}}\n",
+        )
+        .unwrap();
+        let evidence = Arc::new(FakeAccountEvidence::new(Some(account(
+            "acct_a",
+            "Account A",
+            "2026-07-24T02:00:00Z",
+        ))));
+        let service = TokenUsageService::with_account_evidence(
+            Database::in_memory().unwrap(),
+            vec![active],
+            evidence.clone(),
+        );
+        service.scan().unwrap();
+
+        evidence.set(Some(account("acct_b", "Account B", "2026-07-24T02:01:00Z")));
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"{\"timestamp\":\"2026-07-24T02:01:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":2,\"output_tokens\":3}}}}\n")
+            .unwrap();
+        service.scan().unwrap();
+
+        let data = ready(service.query(TokenUsageFilters::default()));
+        assert_eq!(
+            data.sessions[0]
+                .assignment
+                .account
+                .as_ref()
+                .unwrap()
+                .account_key,
+            "acct_a"
+        );
+    }
+
+    #[test]
+    fn absent_evidence_is_explicitly_unassigned_and_never_guessed_later() {
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("sessions");
+        fs::create_dir_all(&active).unwrap();
+        let path = active.join("unassigned.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-07-25T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"unassigned-session\"}}\n",
+                "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":8,\"output_tokens\":2}}}}\n"
+            ),
+        )
+        .unwrap();
+        let evidence = Arc::new(FakeAccountEvidence::new(None));
+        let service = TokenUsageService::with_account_evidence(
+            Database::in_memory().unwrap(),
+            vec![active],
+            evidence.clone(),
+        );
+
+        service.scan().unwrap();
+        evidence.set(Some(account(
+            "acct_after_quota_change",
+            "Later Account",
+            "2026-07-25T00:02:00Z",
+        )));
+        service.scan().unwrap();
+
+        let data = ready(service.query(TokenUsageFilters {
+            account_key: Some(UNASSIGNED_ACCOUNT_FILTER.to_string()),
+            ..TokenUsageFilters::default()
+        }));
+        assert_eq!(data.totals.total_tokens, 10);
+        assert!(data.sessions[0].assignment.account.is_none());
+        assert_eq!(
+            data.sessions[0].assignment.source,
+            AttributionSource::Unassigned
+        );
+    }
+
+    #[test]
+    fn manual_reassignment_is_audited_and_changes_account_filtered_totals() {
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("sessions");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(
+            active.join("manual.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-25T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"manual-session\"}}\n",
+                "{\"timestamp\":\"2026-07-25T01:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":12,\"output_tokens\":8}}}}\n"
+            ),
+        )
+        .unwrap();
+        let evidence = Arc::new(FakeAccountEvidence::new(Some(account(
+            "acct_manual",
+            "Manual Account",
+            "2026-07-25T01:00:00Z",
+        ))));
+        let service = TokenUsageService::with_account_evidence(
+            Database::in_memory().unwrap(),
+            vec![active],
+            evidence,
+        );
+        service.scan().unwrap();
+
+        service
+            .reassign_session("manual-session", None, "2026-07-25T02:00:00Z")
+            .unwrap();
+        let account_data = ready(service.query(TokenUsageFilters {
+            account_key: Some("acct_manual".to_string()),
+            ..TokenUsageFilters::default()
+        }));
+        assert_eq!(account_data.totals.total_tokens, 0);
+        let unassigned = ready(service.query(TokenUsageFilters {
+            account_key: Some(UNASSIGNED_ACCOUNT_FILTER.to_string()),
+            ..TokenUsageFilters::default()
+        }));
+        assert_eq!(unassigned.totals.total_tokens, 20);
+        assert_eq!(
+            unassigned.sessions[0].assignment.source,
+            AttributionSource::Manual
+        );
+        assert_eq!(
+            unassigned.sessions[0].assignment.assigned_at,
+            "2026-07-25T02:00:00Z"
+        );
+
+        service
+            .reassign_session(
+                "manual-session",
+                Some("acct_manual"),
+                "2026-07-25T03:00:00Z",
+            )
+            .unwrap();
+        let reassigned = ready(service.query(TokenUsageFilters {
+            account_key: Some("acct_manual".to_string()),
+            ..TokenUsageFilters::default()
+        }));
+        assert_eq!(reassigned.totals.total_tokens, 20);
+        assert_eq!(
+            reassigned.sessions[0].assignment.source,
+            AttributionSource::Manual
+        );
+        assert_eq!(
+            reassigned.sessions[0].assignment.assigned_at,
+            "2026-07-25T03:00:00Z"
+        );
+        assert!(
+            service
+                .reassign_session(
+                    "manual-session",
+                    Some("unknown-account"),
+                    "2026-07-25T04:00:00Z",
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn existing_token_history_migrates_to_explicit_unassigned_ownership() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE token_usage_events (
+                   event_key TEXT PRIMARY KEY, source_key TEXT NOT NULL,
+                   observed_at_utc TEXT NOT NULL, session_id TEXT NOT NULL, model TEXT NOT NULL,
+                   input_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL,
+                   cache_write_input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                   reasoning_output_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL
+                 );
+                 INSERT INTO token_usage_events VALUES
+                   ('event', 'opaque', '2026-07-19T00:00:00Z', 'legacy-session', 'gpt-5.6',
+                    6, 0, 0, 4, 0, 10);",
+            )
+            .unwrap();
+        drop(connection);
+        let service = TokenUsageService::new(Database::open(&path).unwrap(), Vec::new());
+        service.scan().unwrap();
+
+        let unassigned = ready(service.query(TokenUsageFilters {
+            account_key: Some(UNASSIGNED_ACCOUNT_FILTER.to_string()),
+            ..TokenUsageFilters::default()
+        }));
+
+        assert_eq!(unassigned.totals.total_tokens, 10);
+        assert_eq!(
+            unassigned.sessions[0].assignment.source,
+            AttributionSource::Unassigned
+        );
     }
 }

@@ -80,6 +80,17 @@ export type TokenUsageFilters = {
   endAt?: string;
   model?: string;
   sessionId?: string;
+  accountKey?: string;
+};
+
+export type TokenAccount = { accountKey: string; displayName: string };
+
+export type SessionAttribution = {
+  account: TokenAccount | null;
+  source: "activeAccount" | "unassigned" | "manual";
+  assignedAt: string;
+  evidenceSource: string | null;
+  evidenceObservedAt: string | null;
 };
 
 export type TokenUsageData = {
@@ -91,7 +102,9 @@ export type TokenUsageData = {
     firstObservedAt: string;
     lastObservedAt: string;
     counts: TokenCounts;
+    assignment: SessionAttribution;
   }>;
+  accounts: TokenAccount[];
   updatedAt: string;
 };
 

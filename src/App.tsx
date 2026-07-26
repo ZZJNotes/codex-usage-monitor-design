@@ -380,6 +380,7 @@ export function App() {
           locale={preferences.locale}
           formatLocale={formatLocale}
           onQuery={tokenUsage.query}
+          onReassign={tokenUsage.reassign}
         />
 
         {healthView.notice === "loading" && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}

@@ -85,6 +85,19 @@ pub(crate) fn refresh_token_usage(
 }
 
 #[tauri::command]
+pub(crate) fn reassign_token_session(
+    session_id: String,
+    account_key: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.token_usage.reassign_session(
+        &session_id,
+        account_key.as_deref(),
+        &Utc::now().to_rfc3339(),
+    )
+}
+
+#[tauri::command]
 pub(crate) fn get_application_status(state: State<'_, AppState>) -> ApplicationStatus {
     state
         .application_status
