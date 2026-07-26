@@ -560,7 +560,12 @@ fn save_checkpoint(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, io::Write, sync::RwLock};
+    use std::{
+        fs::OpenOptions,
+        io::{BufWriter, Write},
+        sync::RwLock,
+        time::{Duration, Instant},
+    };
 
     use tempfile::tempdir;
 
@@ -674,6 +679,65 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn common_history_queries_meet_the_release_target_on_ten_thousand_sanitized_events() {
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("sessions");
+        fs::create_dir_all(&active).unwrap();
+        let mut fixture =
+            BufWriter::new(fs::File::create(active.join("release-performance.jsonl")).unwrap());
+        writeln!(
+            fixture,
+            r#"{{"timestamp":"2026-07-20T10:00:00Z","type":"session_meta","payload":{{"id":"sanitized-performance-session"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            fixture,
+            r#"{{"timestamp":"2026-07-20T10:00:00Z","type":"turn_context","payload":{{"model":"gpt-5.6"}}}}"#
+        )
+        .unwrap();
+        for second in 0..10_000 {
+            writeln!(
+                fixture,
+                r#"{{"timestamp":"2026-07-20T10:{:02}:{:02}Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":2,"cached_input_tokens":1,"output_tokens":1,"reasoning_output_tokens":1}}}}}}}}"#,
+                (second / 60) % 60,
+                second % 60,
+            )
+            .unwrap();
+        }
+        fixture.flush().unwrap();
+
+        let service = TokenUsageService::new(Database::in_memory().unwrap(), vec![active]);
+        assert_eq!(service.scan().unwrap().imported_events, 10_000);
+
+        let all_started = Instant::now();
+        let all = ready(service.query(TokenUsageFilters::default()));
+        let all_elapsed = all_started.elapsed();
+        let filtered_started = Instant::now();
+        let filtered = ready(service.query(TokenUsageFilters {
+            model: Some("gpt-5.6".to_string()),
+            session_id: Some("sanitized-performance-session".to_string()),
+            ..TokenUsageFilters::default()
+        }));
+        let filtered_elapsed = filtered_started.elapsed();
+
+        assert_eq!(all.totals.total_tokens, 30_000);
+        assert_eq!(filtered.totals.total_tokens, 30_000);
+        println!(
+            "release query probe: events=10000 all_ms={} filtered_ms={}",
+            all_elapsed.as_millis(),
+            filtered_elapsed.as_millis()
+        );
+        assert!(
+            all_elapsed < Duration::from_millis(500),
+            "unfiltered history query took {all_elapsed:?}"
+        );
+        assert!(
+            filtered_elapsed < Duration::from_millis(500),
+            "filtered history query took {filtered_elapsed:?}"
+        );
     }
 
     #[test]
