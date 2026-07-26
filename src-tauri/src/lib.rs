@@ -9,9 +9,10 @@ mod tray;
 
 use std::{
     fs,
+    sync::mpsc::{self, RecvTimeoutError},
     sync::{Arc, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use commands::{
@@ -156,11 +157,34 @@ pub fn run() {
             });
             let token_lifecycle = app.state::<AppState>().lifecycle.clone();
             thread::spawn(move || {
+                let _ = token_usage.scan();
+                let (watch_sender, watch_receiver) = mpsc::channel();
+                let _watcher = token_usage.watcher(watch_sender).ok();
+                let mut pending_change = false;
+                let mut was_paused = token_lifecycle.preferences().monitoring_paused;
+                let mut last_reconciliation = Instant::now();
                 loop {
-                    if !token_lifecycle.preferences().monitoring_paused {
-                        let _ = token_usage.scan();
+                    match watch_receiver.recv_timeout(Duration::from_secs(2)) {
+                        Ok(()) => {
+                            pending_change = true;
+                            while watch_receiver
+                                .recv_timeout(Duration::from_millis(300))
+                                .is_ok()
+                            {}
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            thread::sleep(Duration::from_secs(2))
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
                     }
-                    thread::sleep(Duration::from_secs(2));
+                    let paused = token_lifecycle.preferences().monitoring_paused;
+                    let reconcile = last_reconciliation.elapsed() >= Duration::from_secs(30);
+                    if !paused && (pending_change || reconcile || was_paused) {
+                        let _ = token_usage.scan();
+                        pending_change = false;
+                        last_reconciliation = Instant::now();
+                    }
+                    was_paused = paused;
                 }
             });
             Ok(())

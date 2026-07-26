@@ -94,4 +94,5 @@ export type TokenUsageData = {
 export type TokenUsageState =
   | { status: "loading" }
   | { status: "ready"; data: TokenUsageData }
+  | { status: "stale"; data: TokenUsageData; reason: "paused" | "outdated" }
   | { status: "error"; message: string; lastData: TokenUsageData | null };

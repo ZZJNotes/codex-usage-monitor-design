@@ -74,7 +74,12 @@ pub(crate) fn get_token_usage(
     filters: TokenUsageFilters,
     state: State<'_, AppState>,
 ) -> TokenUsageState {
-    state.token_usage.query(filters)
+    let current = state.token_usage.query(filters);
+    if state.lifecycle.preferences().monitoring_paused {
+        current.paused()
+    } else {
+        current
+    }
 }
 
 #[tauri::command]
@@ -83,7 +88,7 @@ pub(crate) fn refresh_token_usage(
     state: State<'_, AppState>,
 ) -> TokenUsageState {
     if state.lifecycle.preferences().monitoring_paused {
-        return state.token_usage.query(filters);
+        return state.token_usage.query(filters).paused();
     }
     let _ = state.token_usage.scan();
     state.token_usage.query(filters)

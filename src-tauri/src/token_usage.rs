@@ -1,18 +1,26 @@
 use std::{
-    collections::{BTreeMap, hash_map::DefaultHasher},
+    collections::BTreeSet,
     fs::{self, File},
-    hash::{Hash, Hasher},
-    io::{BufRead, BufReader, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, mpsc::Sender},
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{OptionalExtension, params, params_from_iter, types::Value as SqlValue};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::database::Database;
+
+#[path = "token_usage/parser.rs"]
+mod parser;
+pub use parser::{ParseResult, parse_jsonl};
+use parser::{ParsedLine, ParserContext, parse_line};
+#[path = "token_usage/repository.rs"]
+mod repository;
+use repository::{insert_event, query_usage};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,139 +57,8 @@ pub struct TokenEvent {
     pub model: String,
     pub observed_at: String,
     pub counts: TokenCounts,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseResult {
-    pub events: Vec<TokenEvent>,
-    pub malformed_lines: usize,
-    pub unknown_events: usize,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ParserContext {
-    session_id: Option<String>,
-    model: Option<String>,
-}
-
-enum ParsedLine {
-    Event(TokenEvent),
-    Known,
-    Unknown,
-    Malformed,
-}
-
-pub fn parse_jsonl(input: &str, fallback_session_id: &str) -> ParseResult {
-    let mut context = ParserContext::default();
-    let mut result = ParseResult {
-        events: Vec::new(),
-        malformed_lines: 0,
-        unknown_events: 0,
-    };
-    for line in input.lines() {
-        apply_parsed_line(
-            parse_line(line.as_bytes(), &mut context, fallback_session_id),
-            &mut result,
-        );
-    }
-    result
-}
-
-fn apply_parsed_line(line: ParsedLine, result: &mut ParseResult) {
-    match line {
-        ParsedLine::Event(event) => result.events.push(event),
-        ParsedLine::Known => {}
-        ParsedLine::Unknown => result.unknown_events += 1,
-        ParsedLine::Malformed => result.malformed_lines += 1,
-    }
-}
-
-fn parse_line(line: &[u8], context: &mut ParserContext, fallback: &str) -> ParsedLine {
-    if line.iter().all(u8::is_ascii_whitespace) {
-        return ParsedLine::Known;
-    }
-    let value: Value = match serde_json::from_slice(line) {
-        Ok(value) => value,
-        Err(_) => return ParsedLine::Malformed,
-    };
-    let event_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let payload = value.get("payload").unwrap_or(&Value::Null);
-    match event_type {
-        "session_meta" => {
-            if let Some(id) = payload
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-            {
-                context.session_id = Some(id.to_string());
-            }
-            ParsedLine::Known
-        }
-        "turn_context" => {
-            if let Some(model) = payload
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|model| !model.is_empty())
-            {
-                context.model = Some(model.to_string());
-            }
-            ParsedLine::Known
-        }
-        "event_msg" if payload.get("type").and_then(Value::as_str) == Some("token_count") => {
-            let Some(usage) = payload
-                .get("info")
-                .and_then(|info| info.get("last_token_usage"))
-                .filter(|usage| usage.is_object())
-            else {
-                // Cumulative usage is reconciliation metadata, not a second request event.
-                return ParsedLine::Known;
-            };
-            let observed_at = value
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
-                .map(|timestamp| {
-                    timestamp
-                        .with_timezone(&Utc)
-                        .to_rfc3339_opts(SecondsFormat::Millis, true)
-                });
-            let Some(observed_at) = observed_at else {
-                return ParsedLine::Malformed;
-            };
-            let input_tokens = usage_u64(usage, "input_tokens");
-            let output_tokens = usage_u64(usage, "output_tokens");
-            let counts = TokenCounts {
-                input_tokens,
-                cached_input_tokens: usage_u64(usage, "cached_input_tokens"),
-                cache_write_input_tokens: usage_u64(usage, "cache_write_input_tokens")
-                    .max(usage_u64(usage, "cache_creation_input_tokens")),
-                output_tokens,
-                reasoning_output_tokens: usage_u64(usage, "reasoning_output_tokens"),
-                // Upstream total fields are not trusted because subsets must not be added twice.
-                total_tokens: input_tokens.saturating_add(output_tokens),
-            };
-            ParsedLine::Event(TokenEvent {
-                session_id: context
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| fallback.to_string()),
-                model: context
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                observed_at,
-                counts,
-            })
-        }
-        _ => ParsedLine::Unknown,
-    }
-}
-
-fn usage_u64(usage: &Value, key: &str) -> u64 {
-    usage.get(key).and_then(Value::as_u64).unwrap_or(0)
+    #[serde(skip)]
+    pub(super) event_ordinal: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -230,6 +107,29 @@ pub enum TokenUsageState {
         message: String,
         last_data: Option<TokenUsageData>,
     },
+    Stale {
+        data: TokenUsageData,
+        reason: TokenUsageStaleReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TokenUsageStaleReason {
+    Paused,
+    Outdated,
+}
+
+impl TokenUsageState {
+    pub fn paused(self) -> Self {
+        match self {
+            Self::Ready { data } | Self::Stale { data, .. } => Self::Stale {
+                data,
+                reason: TokenUsageStaleReason::Paused,
+            },
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -251,6 +151,7 @@ pub struct TokenUsageService {
     roots: Vec<PathBuf>,
     last_data: Mutex<Option<TokenUsageData>>,
     last_scan_error: Mutex<Option<String>>,
+    last_scan_at: Mutex<Option<DateTime<Utc>>>,
 }
 
 impl TokenUsageService {
@@ -260,6 +161,7 @@ impl TokenUsageService {
             roots,
             last_data: Mutex::new(None),
             last_scan_error: Mutex::new(None),
+            last_scan_at: Mutex::new(None),
         }
     }
 
@@ -285,12 +187,27 @@ impl TokenUsageService {
             .last_scan_error
             .lock()
             .expect("token error lock poisoned") = result.as_ref().err().cloned();
+        if result.is_ok() {
+            *self
+                .last_scan_at
+                .lock()
+                .expect("token scan time lock poisoned") = Some(Utc::now());
+        }
         result
     }
 
     pub fn query(&self, filters: TokenUsageFilters) -> TokenUsageState {
         match query_usage(&self.database, &filters) {
             Ok(data) => {
+                let Some(scanned_at) = *self
+                    .last_scan_at
+                    .lock()
+                    .expect("token scan time lock poisoned")
+                else {
+                    return TokenUsageState::Loading;
+                };
+                let mut data = data;
+                data.updated_at = scanned_at.to_rfc3339_opts(SecondsFormat::Millis, true);
                 *self.last_data.lock().expect("token data lock poisoned") = Some(data.clone());
                 match self
                     .last_scan_error
@@ -302,6 +219,12 @@ impl TokenUsageService {
                         message,
                         last_data: Some(data),
                     },
+                    None if (Utc::now() - scanned_at).num_seconds() > 10 => {
+                        TokenUsageState::Stale {
+                            data,
+                            reason: TokenUsageStaleReason::Outdated,
+                        }
+                    }
                     None => TokenUsageState::Ready { data },
                 }
             }
@@ -324,10 +247,21 @@ impl TokenUsageService {
             offset: 0,
             context: ParserContext::default(),
         });
-        if metadata.len() < checkpoint.offset {
+        let identity = file_identity(&metadata);
+        let anchor_matches = if checkpoint.offset == 0 {
+            true
+        } else if metadata.len() < checkpoint.offset || checkpoint.context.file_identity != identity
+        {
+            false
+        } else {
+            checkpoint.context.anchor_hash.as_deref()
+                == Some(anchor_hash(path, checkpoint.offset)?.as_str())
+        };
+        if !anchor_matches {
             checkpoint.offset = 0;
             checkpoint.context = ParserContext::default();
         }
+        checkpoint.context.file_identity = identity;
 
         let mut reader = BufReader::new(
             File::open(path).map_err(|error| redacted_io_error("open session", error))?,
@@ -369,8 +303,33 @@ impl TokenUsageService {
             offset += read as u64;
         }
         checkpoint.offset = offset;
+        checkpoint.context.anchor_hash = Some(anchor_hash(path, offset)?);
         save_checkpoint(&self.database, &source_key, metadata.len(), &checkpoint)?;
         Ok(report)
+    }
+
+    pub fn watcher(&self, sender: Sender<()>) -> Result<RecommendedWatcher, String> {
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if event.is_ok() {
+                    let _ = sender.send(());
+                }
+            })
+            .map_err(|_| "create session watcher failed".to_string())?;
+        let mut watched = BTreeSet::new();
+        for root in &self.roots {
+            let target = if root.exists() {
+                Some(root.as_path())
+            } else {
+                root.parent().filter(|parent| parent.exists())
+            };
+            if let Some(target) = target.filter(|target| watched.insert((*target).to_path_buf())) {
+                watcher
+                    .watch(target, RecursiveMode::Recursive)
+                    .map_err(|_| "watch sessions failed".to_string())?;
+            }
+        }
+        Ok(watcher)
     }
 }
 
@@ -418,23 +377,37 @@ fn redacted_io_error(action: &str, error: std::io::Error) -> String {
 }
 
 fn opaque_hash(value: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    hex_digest(value.as_bytes())
 }
 
-fn event_key(event: &TokenEvent) -> String {
-    opaque_hash(&format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}",
-        event.session_id,
-        event.observed_at,
-        event.model,
-        event.counts.input_tokens,
-        event.counts.cached_input_tokens,
-        event.counts.cache_write_input_tokens,
-        event.counts.output_tokens,
-        event.counts.reasoning_output_tokens,
-    ))
+fn hex_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn anchor_hash(path: &Path, offset: u64) -> Result<String, String> {
+    if offset == 0 {
+        return Ok(hex_digest(&[]));
+    }
+    const ANCHOR_SIZE: u64 = 512;
+    let start = offset.saturating_sub(ANCHOR_SIZE);
+    let mut file = File::open(path).map_err(|error| redacted_io_error("open session", error))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| redacted_io_error("seek session", error))?;
+    let mut bytes = vec![0; (offset - start) as usize];
+    file.read_exact(&mut bytes)
+        .map_err(|error| redacted_io_error("verify session", error))?;
+    Ok(hex_digest(&bytes))
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    Some(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &fs::Metadata) -> Option<String> {
+    None
 }
 
 fn load_checkpoint(database: &Database, source_key: &str) -> Result<Option<Checkpoint>, String> {
@@ -487,116 +460,6 @@ fn save_checkpoint(
     })
 }
 
-fn insert_event(database: &Database, source_key: &str, event: &TokenEvent) -> Result<bool, String> {
-    database.with_connection(|connection| {
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO token_usage_events
-                   (event_key, source_key, observed_at_utc, session_id, model,
-                    input_tokens, cached_input_tokens, cache_write_input_tokens,
-                    output_tokens, reasoning_output_tokens, total_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    event_key(event),
-                    source_key,
-                    event.observed_at,
-                    event.session_id,
-                    event.model,
-                    to_i64(event.counts.input_tokens),
-                    to_i64(event.counts.cached_input_tokens),
-                    to_i64(event.counts.cache_write_input_tokens),
-                    to_i64(event.counts.output_tokens),
-                    to_i64(event.counts.reasoning_output_tokens),
-                    to_i64(event.counts.total_tokens),
-                ],
-            )
-            .map(|changed| changed == 1)
-            .map_err(|error| error.to_string())
-    })
-}
-
-fn to_i64(value: u64) -> i64 {
-    value.min(i64::MAX as u64) as i64
-}
-
-fn query_usage(database: &Database, filters: &TokenUsageFilters) -> Result<TokenUsageData, String> {
-    database.with_connection(|connection| {
-        let mut sql = String::from(
-            "SELECT observed_at_utc, session_id, model, input_tokens,
-                    cached_input_tokens, cache_write_input_tokens, output_tokens,
-                    reasoning_output_tokens, total_tokens
-             FROM token_usage_events WHERE 1 = 1",
-        );
-        let mut values = Vec::<SqlValue>::new();
-        for (column, value, operator) in [
-            ("observed_at_utc", filters.start_at.as_ref(), ">="),
-            ("observed_at_utc", filters.end_at.as_ref(), "<="),
-            ("model", filters.model.as_ref(), "="),
-            ("session_id", filters.session_id.as_ref(), "="),
-        ] {
-            if let Some(value) = value.filter(|value| !value.is_empty()) {
-                sql.push_str(&format!(" AND {column} {operator} ?"));
-                values.push(SqlValue::Text(value.clone()));
-            }
-        }
-        sql.push_str(" ORDER BY observed_at_utc, event_key");
-        let mut statement = connection
-            .prepare(&sql)
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(params_from_iter(values), |row| {
-                Ok(TokenEvent {
-                    observed_at: row.get(0)?,
-                    session_id: row.get(1)?,
-                    model: row.get(2)?,
-                    counts: TokenCounts {
-                        input_tokens: row.get::<_, i64>(3)?.max(0) as u64,
-                        cached_input_tokens: row.get::<_, i64>(4)?.max(0) as u64,
-                        cache_write_input_tokens: row.get::<_, i64>(5)?.max(0) as u64,
-                        output_tokens: row.get::<_, i64>(6)?.max(0) as u64,
-                        reasoning_output_tokens: row.get::<_, i64>(7)?.max(0) as u64,
-                        total_tokens: row.get::<_, i64>(8)?.max(0) as u64,
-                    },
-                })
-            })
-            .map_err(|error| error.to_string())?;
-
-        let mut totals = TokenCounts::default();
-        let mut models = BTreeMap::<String, TokenCounts>::new();
-        let mut sessions = BTreeMap::<(String, String), SessionUsage>::new();
-        let mut updated_at = None;
-        for row in rows {
-            let event = row.map_err(|error| error.to_string())?;
-            totals.add_assign(&event.counts);
-            models
-                .entry(event.model.clone())
-                .or_default()
-                .add_assign(&event.counts);
-            let session = sessions
-                .entry((event.session_id.clone(), event.model.clone()))
-                .or_insert_with(|| SessionUsage {
-                    session_id: event.session_id.clone(),
-                    model: event.model.clone(),
-                    first_observed_at: event.observed_at.clone(),
-                    last_observed_at: event.observed_at.clone(),
-                    counts: TokenCounts::default(),
-                });
-            session.last_observed_at = event.observed_at.clone();
-            session.counts.add_assign(&event.counts);
-            updated_at = Some(event.observed_at);
-        }
-        Ok(TokenUsageData {
-            totals,
-            models: models
-                .into_iter()
-                .map(|(model, counts)| ModelUsage { model, counts })
-                .collect(),
-            sessions: sessions.into_values().collect(),
-            updated_at: updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs::OpenOptions, io::Write};
@@ -610,6 +473,7 @@ mod tests {
             TokenUsageState::Ready { data } => data,
             TokenUsageState::Error { message, .. } => panic!("unexpected error: {message}"),
             TokenUsageState::Loading => panic!("unexpected loading state"),
+            TokenUsageState::Stale { data, .. } => data,
         }
     }
 
@@ -673,6 +537,13 @@ mod tests {
         }));
         assert_eq!(filtered.totals.total_tokens, 180);
         assert_eq!(filtered.sessions.len(), 1);
+        assert!(matches!(
+            service.query(TokenUsageFilters::default()).paused(),
+            TokenUsageState::Stale {
+                reason: TokenUsageStaleReason::Paused,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -767,5 +638,31 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn identical_usage_records_in_the_same_millisecond_are_distinct_requests() {
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("sessions");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(
+            active.join("same-time.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-23T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"same-time-session\"}}\n",
+                "{\"timestamp\":\"2026-07-23T00:00:01.123456Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":4,\"output_tokens\":6}}}}\n",
+                "{\"timestamp\":\"2026-07-23T00:00:01.123789Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":4,\"output_tokens\":6}}}}\n"
+            ),
+        )
+        .unwrap();
+        let service = TokenUsageService::new(Database::in_memory().unwrap(), vec![active]);
+
+        assert_eq!(service.scan().unwrap().imported_events, 2);
+        assert_eq!(
+            ready(service.query(TokenUsageFilters::default()))
+                .totals
+                .total_tokens,
+            20
+        );
+        assert_eq!(service.scan().unwrap().imported_events, 0);
     }
 }

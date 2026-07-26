@@ -105,6 +105,7 @@ test("shows exact token semantics and accessible time model session query contro
   render(<App />);
 
   expect(await screen.findByRole("heading", { name: "Token 使用" })).toBeVisible();
+  expect(screen.getByText(/Token 统计已更新/)).toBeVisible();
   expect(screen.getAllByText("180").length).toBeGreaterThanOrEqual(1);
   expect(screen.getByText("总量 = 输入 + 输出；缓存与推理是子集，不会重复相加。")).toBeVisible();
   expect(screen.getByLabelText("开始时间")).toBeEnabled();
