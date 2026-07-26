@@ -24,6 +24,8 @@ export const monitorApi = {
   refreshTokenUsage: (filters: TokenUsageFilters = {}) =>
     invoke<TokenUsageState>("refresh_token_usage", { filters }),
   recoverQuota: () => invoke<QuotaState>("recover_quota"),
+  reassignTokenSession: (sessionId: string, accountKey: string | null) =>
+    invoke<void>("reassign_token_session", { sessionId, accountKey }),
   getPreferences: () =>
     invoke<LifecyclePreferences>("get_lifecycle_preferences"),
   setPaused: (paused: boolean) =>

@@ -172,6 +172,7 @@ enum RefreshTrigger {
     Automatic,
     Manual,
     Recovery,
+    Evidence,
 }
 
 pub struct QuotaService {
@@ -309,6 +310,10 @@ impl QuotaService {
         self.refresh(RefreshTrigger::Recovery)
     }
 
+    pub(crate) fn refresh_account_evidence(&self) -> QuotaState {
+        self.refresh(RefreshTrigger::Evidence)
+    }
+
     fn stagger_recovery_if_due(&self) {
         let now = self.clock.now();
         let mut schedule = self.schedule.lock().expect("quota schedule poisoned");
@@ -386,6 +391,7 @@ impl QuotaService {
                     schedule.last_recovery_at = Some(now);
                 }
                 RefreshTrigger::Automatic => {}
+                RefreshTrigger::Evidence => {}
             }
         }
 

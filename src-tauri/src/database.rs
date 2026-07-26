@@ -97,6 +97,28 @@ impl Database {
                    ON token_usage_events(model, observed_at_utc);
                  CREATE INDEX IF NOT EXISTS token_usage_session_time_idx
                    ON token_usage_events(session_id, observed_at_utc);
+                 CREATE TABLE IF NOT EXISTS token_accounts (
+                   account_key TEXT PRIMARY KEY,
+                   display_name TEXT NOT NULL,
+                   last_evidence_source TEXT NOT NULL,
+                   last_evidence_at_utc TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS token_session_attributions (
+                   session_id TEXT PRIMARY KEY,
+                   account_key TEXT,
+                   attribution_source TEXT NOT NULL CHECK (attribution_source IN ('activeAccount', 'unassigned', 'manual')),
+                   assigned_at_utc TEXT NOT NULL,
+                   evidence_source TEXT,
+                   evidence_observed_at_utc TEXT,
+                   FOREIGN KEY (account_key) REFERENCES token_accounts(account_key)
+                 );
+                 CREATE INDEX IF NOT EXISTS token_attribution_account_idx
+                   ON token_session_attributions(account_key);
+                 INSERT OR IGNORE INTO token_session_attributions
+                   (session_id, account_key, attribution_source, assigned_at_utc,
+                    evidence_source, evidence_observed_at_utc)
+                   SELECT session_id, NULL, 'unassigned', MIN(observed_at_utc), NULL, NULL
+                   FROM token_usage_events GROUP BY session_id;
                  CREATE TABLE IF NOT EXISTS token_import_checkpoints (
                    source_key TEXT PRIMARY KEY,
                    byte_offset INTEGER NOT NULL,

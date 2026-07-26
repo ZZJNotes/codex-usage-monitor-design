@@ -23,6 +23,7 @@ pub(super) struct ParserContext {
 
 pub(super) enum ParsedLine {
     Event(TokenEvent),
+    SessionObserved(String),
     Known,
     Unknown,
     Malformed,
@@ -38,6 +39,7 @@ pub fn parse_jsonl(input: &str, fallback_session_id: &str) -> ParseResult {
     for line in input.lines() {
         match parse_line(line.as_bytes(), &mut context, fallback_session_id) {
             ParsedLine::Event(event) => result.events.push(event),
+            ParsedLine::SessionObserved(_) => {}
             ParsedLine::Known => {}
             ParsedLine::Unknown => result.unknown_events += 1,
             ParsedLine::Malformed => result.malformed_lines += 1,
@@ -67,6 +69,7 @@ pub(super) fn parse_line(line: &[u8], context: &mut ParserContext, fallback: &st
                 .filter(|id| !id.is_empty())
             {
                 context.session_id = Some(id.to_string());
+                return ParsedLine::SessionObserved(id.to_string());
             }
             ParsedLine::Known
         }

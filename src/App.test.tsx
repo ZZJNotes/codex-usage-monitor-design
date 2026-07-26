@@ -63,12 +63,20 @@ beforeEach(() => {
             totalTokens: 180,
           },
           models: [{ model: "gpt-5.6", counts: { inputTokens: 120, cachedInputTokens: 45, cacheWriteInputTokens: 12, outputTokens: 60, reasoningOutputTokens: 14, totalTokens: 180 } }],
+          accounts: [{ accountKey: "acct_a", displayName: "Account A" }],
           sessions: [{
             sessionId: "sanitized-session-01",
             model: "gpt-5.6",
             firstObservedAt: "2026-07-20T10:00:03Z",
             lastObservedAt: "2026-07-20T10:00:05Z",
             counts: { inputTokens: 120, cachedInputTokens: 45, cacheWriteInputTokens: 12, outputTokens: 60, reasoningOutputTokens: 14, totalTokens: 180 },
+            assignment: {
+              account: null,
+              source: "unassigned",
+              assignedAt: "2026-07-20T10:00:03Z",
+              evidenceSource: null,
+              evidenceObservedAt: null,
+            },
           }],
           updatedAt: "2026-07-20T10:00:05Z",
         },
@@ -92,6 +100,9 @@ beforeEach(() => {
           uptimeSeconds: 7_200,
         },
       });
+    }
+    if (command === "reassign_token_session") {
+      return Promise.resolve();
     }
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
@@ -142,6 +153,7 @@ test("shows exact token semantics and accessible time model session query contro
       endAt: undefined,
       model: "gpt-5.6",
       sessionId: "sanitized-session-01",
+      accountKey: undefined,
     },
   }));
 });
@@ -198,4 +210,30 @@ test("shows manual refresh cooldown as disabled feedback", async () => {
 
   expect(await screen.findByText("刷新冷却中")).toBeVisible();
   expect(screen.getByRole("button", { name: /后可刷新/ })).toBeDisabled();
+});
+
+test("shows unassigned ownership, filters by account, and offers an accessible correction", async () => {
+  render(<App />);
+
+  expect(await screen.findByText("未归属")).toBeVisible();
+  expect(screen.getByText(/来源.*未归属/)).toBeVisible();
+  fireEvent.change(screen.getByLabelText("账户"), { target: { value: "unassigned" } });
+  fireEvent.click(screen.getByRole("button", { name: "查询" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_token_usage", {
+    filters: {
+      startAt: undefined,
+      endAt: undefined,
+      model: undefined,
+      sessionId: undefined,
+      accountKey: "unassigned",
+    },
+  }));
+
+  fireEvent.change(screen.getByLabelText("修正 sanitized-session-01 的账户归属"), {
+    target: { value: "acct_a" },
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("reassign_token_session", {
+    sessionId: "sanitized-session-01",
+    accountKey: "acct_a",
+  }));
 });

@@ -29,5 +29,19 @@ export function useTokenUsage() {
     query(nextFilters: TokenUsageFilters) {
       setFilters(nextFilters);
     },
+    async reassign(sessionId: string, accountKey: string | null) {
+      try {
+        await monitorApi.reassignTokenSession(sessionId, accountKey);
+        await read(filters);
+      } catch (error) {
+        setState((current) => ({
+          status: "error",
+          message: errorMessage(error),
+          lastData: current.status === "ready" ? current.data
+            : current.status === "stale" ? current.data
+            : current.status === "error" ? current.lastData : null,
+        }));
+      }
+    },
   };
 }

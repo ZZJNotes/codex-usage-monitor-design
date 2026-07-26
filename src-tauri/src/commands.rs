@@ -5,7 +5,7 @@ use crate::{
     AppState, ApplicationStatus,
     lifecycle::LifecyclePreferences,
     quota::{QuotaService, QuotaState},
-    show_main_window,
+    set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     token_usage::{TokenUsageFilters, TokenUsageState},
     tray::{TrayMenuItems, update_tray_locale, update_tray_text},
@@ -120,6 +120,19 @@ pub(crate) fn refresh_token_usage(
 }
 
 #[tauri::command]
+pub(crate) fn reassign_token_session(
+    session_id: String,
+    account_key: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.token_usage.reassign_session(
+        &session_id,
+        account_key.as_deref(),
+        &Utc::now().to_rfc3339(),
+    )
+}
+
+#[tauri::command]
 pub(crate) fn get_application_status(state: State<'_, AppState>) -> ApplicationStatus {
     state
         .application_status
@@ -139,7 +152,8 @@ pub(crate) fn set_monitoring_paused(
     state: State<'_, AppState>,
     tray: State<'_, TrayMenuItems>,
 ) -> Result<LifecyclePreferences, String> {
-    let preferences = state.lifecycle.set_monitoring_paused(paused)?;
+    let preferences =
+        set_monitoring_paused_with_account_evidence(&state.lifecycle, &state.quota, paused)?;
     update_tray_text(&tray, preferences.locale, preferences.monitoring_paused);
     Ok(preferences)
 }

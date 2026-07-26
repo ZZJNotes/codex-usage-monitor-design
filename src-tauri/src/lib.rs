@@ -16,12 +16,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use commands::{
     get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, get_token_usage, recover_quota, refresh_quota,
-    refresh_system_health, refresh_token_usage, set_locale, set_monitoring_paused, set_theme,
-    show_dashboard,
+    get_system_health_history, get_token_usage, reassign_token_session, recover_quota,
+    refresh_quota, refresh_system_health, refresh_token_usage, set_locale, set_monitoring_paused,
+    set_theme, show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
@@ -31,7 +31,7 @@ use quota_app_server::CodexAppServerSource;
 use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{ActivationPolicy, AppHandle, Manager, Runtime, WindowEvent};
-use token_usage::TokenUsageService;
+use token_usage::{AccountEvidenceSource, ActiveAccountEvidence, TokenAccount, TokenUsageService};
 use tray::setup_tray;
 
 pub(crate) struct AppState {
@@ -52,6 +52,52 @@ pub(crate) struct ApplicationStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StorageIssue {
     pub(crate) detail: String,
+}
+
+struct CurrentQuotaAccountEvidence(Arc<QuotaService>);
+
+impl AccountEvidenceSource for CurrentQuotaAccountEvidence {
+    fn active_account(&self) -> Option<ActiveAccountEvidence> {
+        current_quota_account_evidence(&self.0.latest(), Utc::now())
+    }
+}
+
+const ACTIVE_ACCOUNT_EVIDENCE_MAX_AGE_SECONDS: i64 = 30;
+
+fn current_quota_account_evidence(
+    state: &quota::QuotaState,
+    now: DateTime<Utc>,
+) -> Option<ActiveAccountEvidence> {
+    let quota::QuotaState::Ready { snapshot, .. } = state else {
+        return None;
+    };
+    let age_seconds = (now - snapshot.updated_at).num_seconds();
+    if !(0..=ACTIVE_ACCOUNT_EVIDENCE_MAX_AGE_SECONDS).contains(&age_seconds) {
+        return None;
+    }
+    let display_name = snapshot.account.display_name.trim();
+    if display_name.is_empty() || display_name == "ChatGPT account" {
+        return None;
+    }
+    Some(ActiveAccountEvidence {
+        account: TokenAccount {
+            account_key: snapshot.account.id.as_str().to_string(),
+            display_name: display_name.to_string(),
+        },
+        source: "codexAppServerAccountRead".to_string(),
+        observed_at: snapshot.updated_at.to_rfc3339(),
+    })
+}
+
+pub(crate) fn set_monitoring_paused_with_account_evidence(
+    lifecycle: &LifecycleService,
+    quota: &QuotaService,
+    paused: bool,
+) -> Result<lifecycle::LifecyclePreferences, String> {
+    if !paused {
+        quota.refresh_account_evidence();
+    }
+    lifecycle.set_monitoring_paused(paused)
 }
 
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -75,6 +121,7 @@ pub fn run() {
             get_token_usage,
             refresh_token_usage,
             recover_quota,
+            reassign_token_session,
             get_application_status,
             get_lifecycle_preferences,
             set_monitoring_paused,
@@ -111,7 +158,14 @@ pub fn run() {
                     Arc::new(database.clone()),
                 ),
             });
-            let token_usage = Arc::new(TokenUsageService::default_roots(database.clone()));
+            if !lifecycle.preferences().monitoring_paused {
+                quota.refresh_account_evidence();
+            }
+            let token_usage = Arc::new(TokenUsageService::with_account_evidence(
+                database.clone(),
+                token_usage::default_roots(),
+                Arc::new(CurrentQuotaAccountEvidence(quota.clone())),
+            ));
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
             app.manage(AppState {
                 health: health.clone(),
@@ -220,4 +274,111 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Codex Usage Monitor");
+}
+
+#[cfg(test)]
+mod account_evidence_tests {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use chrono::{Duration, Utc};
+
+    use super::*;
+
+    fn quota_snapshot(updated_at: chrono::DateTime<Utc>) -> quota::QuotaSnapshot {
+        quota::QuotaSnapshot {
+            account: quota::QuotaAccount {
+                id: "sanitized-account".into(),
+                display_name: "sanitized@example.com".to_string(),
+                plan_type: "plus".to_string(),
+            },
+            windows: Vec::new(),
+            updated_at,
+        }
+    }
+
+    fn quota_state(updated_at: chrono::DateTime<Utc>) -> quota::QuotaState {
+        quota::QuotaState::Ready {
+            snapshot: quota_snapshot(updated_at),
+            next_refresh_at: updated_at + Duration::minutes(10),
+        }
+    }
+
+    #[test]
+    fn only_fresh_quota_observations_are_active_account_evidence() {
+        let now = Utc::now();
+
+        assert!(current_quota_account_evidence(&quota_state(now), now).is_some());
+        assert!(
+            current_quota_account_evidence(&quota_state(now - Duration::seconds(31)), now)
+                .is_none()
+        );
+        assert!(
+            current_quota_account_evidence(&quota_state(now + Duration::seconds(1)), now).is_none()
+        );
+        assert!(
+            current_quota_account_evidence(
+                &quota::QuotaState::Error {
+                    reason: quota::QuotaErrorReason::Unavailable,
+                    last_snapshot: None,
+                    failed_at: now,
+                    retry_at: None,
+                },
+                now,
+            )
+            .is_none()
+        );
+    }
+
+    struct ResumeOrderStore {
+        refreshed: Arc<AtomicBool>,
+        saved: Mutex<lifecycle::LifecyclePreferences>,
+    }
+
+    impl lifecycle::PreferenceStore for ResumeOrderStore {
+        fn load(&self) -> Result<Option<lifecycle::LifecyclePreferences>, String> {
+            Ok(Some(self.saved.lock().unwrap().clone()))
+        }
+
+        fn save(&self, preferences: &lifecycle::LifecyclePreferences) -> Result<(), String> {
+            if !preferences.monitoring_paused {
+                assert!(self.refreshed.load(Ordering::SeqCst));
+            }
+            *self.saved.lock().unwrap() = preferences.clone();
+            Ok(())
+        }
+    }
+
+    struct ResumeEvidenceSource(Arc<AtomicBool>);
+
+    impl quota::QuotaSource for ResumeEvidenceSource {
+        fn refresh(&self) -> Result<quota::QuotaSnapshot, quota::QuotaRefreshError> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(quota_snapshot(Utc::now()))
+        }
+    }
+
+    #[test]
+    fn resuming_refreshes_account_evidence_before_monitoring_becomes_active() {
+        let refreshed = Arc::new(AtomicBool::new(false));
+        let store = Arc::new(ResumeOrderStore {
+            refreshed: refreshed.clone(),
+            saved: Mutex::new(lifecycle::LifecyclePreferences {
+                monitoring_paused: true,
+                ..lifecycle::LifecyclePreferences::default()
+            }),
+        });
+        let lifecycle = LifecycleService::new(store).unwrap();
+        let quota = QuotaService::new(
+            "sanitized-account",
+            Arc::new(ResumeEvidenceSource(refreshed)),
+        );
+
+        let preferences =
+            set_monitoring_paused_with_account_evidence(&lifecycle, &quota, false).unwrap();
+
+        assert!(!preferences.monitoring_paused);
+    }
 }
