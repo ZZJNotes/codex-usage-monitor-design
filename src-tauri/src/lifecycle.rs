@@ -263,6 +263,17 @@ impl LifecycleService {
         self.update(|preferences| preferences.retention_days = retention.days())
     }
 
+    pub fn set_show_in_dock(&self, show_in_dock: bool) -> Result<LifecyclePreferences, String> {
+        self.update(|preferences| preferences.show_in_dock = show_in_dock)
+    }
+
+    pub fn set_launch_at_login(
+        &self,
+        launch_at_login: bool,
+    ) -> Result<LifecyclePreferences, String> {
+        self.update(|preferences| preferences.launch_at_login = launch_at_login)
+    }
+
     pub fn set_locale(&self, locale: &str) -> Result<LifecyclePreferences, String> {
         let locale = Locale::try_from(locale)?;
         self.update(|preferences| preferences.locale = locale)
@@ -541,5 +552,18 @@ mod tests {
             lifecycle.set_notifications(invalid),
             Err("quota thresholds must be unique".to_string())
         );
+    }
+
+    #[test]
+    fn dock_and_login_launch_choices_persist_across_restart() {
+        let store = Arc::new(MemoryPreferenceStore::default());
+        let lifecycle = LifecycleService::new(store.clone()).unwrap();
+
+        lifecycle.set_show_in_dock(true).unwrap();
+        lifecycle.set_launch_at_login(true).unwrap();
+
+        let restarted = LifecycleService::new(store).unwrap();
+        assert!(restarted.preferences().show_in_dock);
+        assert!(restarted.preferences().launch_at_login);
     }
 }

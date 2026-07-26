@@ -26,9 +26,9 @@ use commands::{
     get_application_status, get_credential_deletion_status, get_lifecycle_preferences,
     get_notification_status, get_quota_state, get_system_health, get_system_health_history,
     get_token_usage, reassign_token_session, recover_quota, refresh_quota, refresh_system_health,
-    refresh_token_usage, request_credential_deletion, set_locale, set_menu_bar_preferences,
-    set_monitoring_paused, set_notification_preferences, set_retention_days, set_theme,
-    show_dashboard,
+    refresh_token_usage, request_credential_deletion, set_dock_visibility, set_launch_at_login,
+    set_locale, set_menu_bar_preferences, set_monitoring_paused, set_notification_preferences,
+    set_retention_days, set_theme, show_dashboard, sync_dock_visibility, sync_launch_at_login,
 };
 use database::Database;
 use governance::DataGovernanceService;
@@ -39,7 +39,7 @@ use quota::{CURRENT_CODEX_ACCOUNT_ID, QuotaRefreshCoordinator, QuotaService};
 use quota_app_server::CodexAppServerSource;
 use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
-use tauri::{ActivationPolicy, AppHandle, Manager, Runtime, WindowEvent};
+use tauri::{AppHandle, Manager, Runtime, WindowEvent};
 use token_usage::{AccountEvidenceSource, ActiveAccountEvidence, TokenAccount, TokenUsageService};
 use tray::{TrayMenuItems, setup_tray, update_tray};
 
@@ -75,6 +75,12 @@ impl StorageIssue {
     fn write_failed() -> Self {
         Self {
             detail: "storageWriteFailed".to_string(),
+        }
+    }
+
+    fn retention_cleanup_failed() -> Self {
+        Self {
+            detail: "retentionCleanupFailed".to_string(),
         }
     }
 }
@@ -161,6 +167,10 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_system_health,
@@ -178,6 +188,8 @@ pub fn run() {
             set_monitoring_paused,
             set_theme,
             set_locale,
+            set_dock_visibility,
+            set_launch_at_login,
             set_menu_bar_preferences,
             set_notification_preferences,
             show_dashboard,
@@ -194,7 +206,7 @@ pub fn run() {
             let database_result = fs::create_dir_all(&data_dir)
                 .map_err(|error| error.to_string())
                 .and_then(|_| Database::open(&data_dir.join("monitor.sqlite3")));
-            let (database, storage_issue, ephemeral_storage) = match database_result {
+            let (database, mut storage_issue, ephemeral_storage) = match database_result {
                 Ok(database) => (database, None, false),
                 Err(_) => (
                     Database::in_memory().map_err(std::io::Error::other)?,
@@ -206,8 +218,12 @@ pub fn run() {
                 LifecycleService::new(Arc::new(database.clone())).map_err(std::io::Error::other)?,
             );
             let governance = Arc::new(DataGovernanceService::new(database.clone()));
-            let _ =
-                governance.cleanup_retention(lifecycle.preferences().retention_days, Utc::now());
+            if governance
+                .cleanup_retention(lifecycle.preferences().retention_days, Utc::now())
+                .is_err()
+            {
+                storage_issue = Some(StorageIssue::retention_cleanup_failed());
+            }
             let health = Arc::new(SystemHealthService::new(Arc::new(MacMetricSource::new())));
             let quota = Arc::new(match CodexAppServerSource::discover() {
                 Ok(source) => QuotaService::with_store(
@@ -251,6 +267,8 @@ pub fn run() {
                 notifications: notifications.clone(),
             });
             let preferences = lifecycle.preferences();
+            sync_launch_at_login(app.handle(), preferences.launch_at_login)
+                .map_err(std::io::Error::other)?;
             app.manage(setup_tray(app.handle(), &preferences)?);
             let tray_app = app.handle().clone();
             thread::spawn(move || {
@@ -261,8 +279,8 @@ pub fn run() {
                 }
             });
 
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(ActivationPolicy::Accessory);
+            sync_dock_visibility(app.handle(), preferences.show_in_dock)
+                .map_err(std::io::Error::other)?;
 
             thread::spawn(move || {
                 loop {

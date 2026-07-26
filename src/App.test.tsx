@@ -59,6 +59,20 @@ beforeEach(() => {
       preferencesResponse = { ...preferencesResponse, menuBar };
       return Promise.resolve(preferencesResponse);
     }
+    if (command === "set_dock_visibility") {
+      preferencesResponse = {
+        ...preferencesResponse,
+        showInDock: (args as { showInDock: boolean }).showInDock,
+      };
+      return Promise.resolve(preferencesResponse);
+    }
+    if (command === "set_launch_at_login") {
+      preferencesResponse = {
+        ...preferencesResponse,
+        launchAtLogin: (args as { launchAtLogin: boolean }).launchAtLogin,
+      };
+      return Promise.resolve(preferencesResponse);
+    }
     if (command === "get_lifecycle_preferences") {
       return Promise.resolve(preferencesResponse);
     }
@@ -415,6 +429,22 @@ test("manual refresh announces cooldown and English settings retain accessible n
   expect(screen.getByRole("group", { name: "Menu bar parameters" })).toBeVisible();
   expect(screen.getByLabelText("Pinned account")).toBeEnabled();
   expect(screen.getByText(/VoiceOver reads order controls/)).toBeVisible();
+});
+
+test("lets the user opt into Dock visibility and launch at login", async () => {
+  render(<App />);
+
+  const dock = await screen.findByRole("checkbox", { name: "在程序坞中显示" });
+  const launch = screen.getByRole("checkbox", { name: "登录 Mac 时启动" });
+  fireEvent.click(dock);
+  fireEvent.click(launch);
+
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("set_dock_visibility", { showInDock: true }),
+  );
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("set_launch_at_login", { launchAtLogin: true }),
+  );
 });
 
 test("offers local retention cleanup and safe export while explaining credential deletion availability", async () => {

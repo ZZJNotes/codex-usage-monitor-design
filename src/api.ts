@@ -40,6 +40,10 @@ export const monitorApi = {
     invoke<LifecyclePreferences>("set_monitoring_paused", { paused }),
   setTheme: (theme: LifecyclePreferences["theme"]) =>
     invoke<LifecyclePreferences>("set_theme", { theme }),
+  setDockVisibility: (showInDock: boolean) =>
+    invoke<LifecyclePreferences>("set_dock_visibility", { showInDock }),
+  setLaunchAtLogin: (launchAtLogin: boolean) =>
+    invoke<LifecyclePreferences>("set_launch_at_login", { launchAtLogin }),
   setLocale: (locale: LifecyclePreferences["locale"]) =>
     invoke<LifecyclePreferences>("set_locale", { locale }),
   setMenuBar: (menuBar: MenuBarPreferences) =>

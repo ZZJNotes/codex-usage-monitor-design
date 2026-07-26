@@ -135,6 +135,7 @@ h1 { margin: 0; font-size: clamp(34px, 4vw, 54px); line-height: 0.98; letter-spa
 .settings-card h2 { margin: 0; font-size: 15px; }
 .settings-card label { color: var(--muted); font-size: 11px; font-weight: 650; display: grid; gap: 6px; }
 .settings-card select { min-width: 138px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 30px 8px 10px; color: var(--ink); background: var(--surface-solid); }
+.settings-card .checkbox-setting { display: flex; align-items: center; grid-template-columns: none; gap: 8px; color: var(--ink); }
 
 .menu-bar-settings { margin-top: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
 .notification-settings { margin-top: 16px; padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }

@@ -368,6 +368,14 @@ export function App() {
     return applyPreferenceMutation(monitorApi.setTheme(theme));
   }
 
+  function updateDockVisibility(showInDock: boolean) {
+    return applyPreferenceMutation(monitorApi.setDockVisibility(showInDock));
+  }
+
+  function updateLaunchAtLogin(launchAtLogin: boolean) {
+    return applyPreferenceMutation(monitorApi.setLaunchAtLogin(launchAtLogin));
+  }
+
   function updateLocale(locale: LifecyclePreferences["locale"]) {
     return applyPreferenceMutation(monitorApi.setLocale(locale));
   }
@@ -575,6 +583,22 @@ export function App() {
               <option value="light">{t("light")}</option>
               <option value="dark">{t("dark")}</option>
             </select>
+          </label>
+          <label className="checkbox-setting">
+            <input
+              type="checkbox"
+              checked={preferences.showInDock}
+              onChange={(event) => void updateDockVisibility(event.target.checked)}
+            />
+            {t("showInDock")}
+          </label>
+          <label className="checkbox-setting">
+            <input
+              type="checkbox"
+              checked={preferences.launchAtLogin}
+              onChange={(event) => void updateLaunchAtLogin(event.target.checked)}
+            />
+            {t("launchAtLogin")}
           </label>
         </section>
 

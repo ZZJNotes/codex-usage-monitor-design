@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::{
     AppState, ApplicationStatus,
@@ -205,6 +206,64 @@ pub(crate) fn set_theme(
     state: State<'_, AppState>,
 ) -> Result<LifecyclePreferences, String> {
     state.lifecycle.set_theme(&theme)
+}
+
+#[tauri::command]
+pub(crate) fn set_dock_visibility(
+    show_in_dock: bool,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<LifecyclePreferences, String> {
+    let previous = state.lifecycle.preferences().show_in_dock;
+    sync_dock_visibility(&app, show_in_dock)?;
+    match state.lifecycle.set_show_in_dock(show_in_dock) {
+        Ok(preferences) => Ok(preferences),
+        Err(error) => {
+            let _ = sync_dock_visibility(&app, previous);
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn sync_dock_visibility(app: &AppHandle, show_in_dock: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        app.set_activation_policy(if show_in_dock {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        })
+        .map_err(|_| "Dock visibility update failed".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
+}
+
+pub(crate) fn sync_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+    .map_err(|_| "launch-at-login update failed".to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_launch_at_login(
+    launch_at_login: bool,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<LifecyclePreferences, String> {
+    let previous = state.lifecycle.preferences().launch_at_login;
+    sync_launch_at_login(&app, launch_at_login)?;
+    match state.lifecycle.set_launch_at_login(launch_at_login) {
+        Ok(preferences) => Ok(preferences),
+        Err(error) => {
+            let _ = sync_launch_at_login(&app, previous);
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
