@@ -117,6 +117,9 @@ pub(crate) fn set_monitoring_paused(
     state: State<'_, AppState>,
     tray: State<'_, TrayMenuItems>,
 ) -> Result<LifecyclePreferences, String> {
+    if !paused {
+        state.quota.refresh();
+    }
     let preferences = state.lifecycle.set_monitoring_paused(paused)?;
     update_tray_text(&tray, preferences.locale, preferences.monitoring_paused);
     Ok(preferences)

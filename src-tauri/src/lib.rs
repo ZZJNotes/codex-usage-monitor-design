@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
 use commands::{
     get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
     get_system_health_history, get_token_usage, reassign_token_session, refresh_quota,
@@ -57,22 +58,35 @@ struct CurrentQuotaAccountEvidence(Arc<QuotaService>);
 
 impl AccountEvidenceSource for CurrentQuotaAccountEvidence {
     fn active_account(&self) -> Option<ActiveAccountEvidence> {
-        let quota::QuotaState::Ready { snapshot } = self.0.latest() else {
-            return None;
-        };
-        let display_name = snapshot.account.display_name.trim();
-        if display_name.is_empty() || display_name == "ChatGPT account" {
-            return None;
-        }
-        Some(ActiveAccountEvidence {
-            account: TokenAccount {
-                account_key: token_usage::token_account_key(display_name),
-                display_name: display_name.to_string(),
-            },
-            source: "codexAppServerAccountRead".to_string(),
-            observed_at: snapshot.updated_at.to_rfc3339(),
-        })
+        current_quota_account_evidence(&self.0.latest(), Utc::now())
     }
+}
+
+const ACTIVE_ACCOUNT_EVIDENCE_MAX_AGE_SECONDS: i64 = 30;
+
+fn current_quota_account_evidence(
+    state: &quota::QuotaState,
+    now: DateTime<Utc>,
+) -> Option<ActiveAccountEvidence> {
+    let quota::QuotaState::Ready { snapshot } = state else {
+        return None;
+    };
+    let age_seconds = (now - snapshot.updated_at).num_seconds();
+    if !(0..=ACTIVE_ACCOUNT_EVIDENCE_MAX_AGE_SECONDS).contains(&age_seconds) {
+        return None;
+    }
+    let display_name = snapshot.account.display_name.trim();
+    if display_name.is_empty() || display_name == "ChatGPT account" {
+        return None;
+    }
+    Some(ActiveAccountEvidence {
+        account: TokenAccount {
+            account_key: token_usage::token_account_key(display_name),
+            display_name: display_name.to_string(),
+        },
+        source: "codexAppServerAccountRead".to_string(),
+        observed_at: snapshot.updated_at.to_rfc3339(),
+    })
 }
 
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -128,6 +142,9 @@ pub fn run() {
                     QuotaService::unavailable_with_store(message, Arc::new(database.clone()))
                 }
             });
+            if !lifecycle.preferences().monitoring_paused {
+                quota.refresh();
+            }
             let token_usage = Arc::new(TokenUsageService::with_account_evidence(
                 database.clone(),
                 token_usage::default_roots(),
@@ -183,10 +200,10 @@ pub fn run() {
             let quota_lifecycle = app.state::<AppState>().lifecycle.clone();
             thread::spawn(move || {
                 loop {
+                    thread::sleep(Duration::from_secs(600));
                     if !quota_lifecycle.preferences().monitoring_paused {
                         quota.refresh();
                     }
-                    thread::sleep(Duration::from_secs(600));
                 }
             });
             let token_lifecycle = app.state::<AppState>().lifecycle.clone();
@@ -233,4 +250,48 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Codex Usage Monitor");
+}
+
+#[cfg(test)]
+mod account_evidence_tests {
+    use chrono::{Duration, Utc};
+
+    use super::*;
+
+    fn quota_state(updated_at: chrono::DateTime<Utc>) -> quota::QuotaState {
+        quota::QuotaState::Ready {
+            snapshot: quota::QuotaSnapshot {
+                account: quota::QuotaAccount {
+                    display_name: "sanitized@example.com".to_string(),
+                    plan_type: "plus".to_string(),
+                },
+                windows: Vec::new(),
+                updated_at,
+            },
+        }
+    }
+
+    #[test]
+    fn only_fresh_quota_observations_are_active_account_evidence() {
+        let now = Utc::now();
+
+        assert!(current_quota_account_evidence(&quota_state(now), now).is_some());
+        assert!(
+            current_quota_account_evidence(&quota_state(now - Duration::seconds(31)), now)
+                .is_none()
+        );
+        assert!(
+            current_quota_account_evidence(&quota_state(now + Duration::seconds(1)), now).is_none()
+        );
+        assert!(
+            current_quota_account_evidence(
+                &quota::QuotaState::Error {
+                    reason: quota::QuotaErrorReason::Unavailable,
+                    last_snapshot: None,
+                },
+                now,
+            )
+            .is_none()
+        );
+    }
 }
