@@ -19,15 +19,16 @@
 
 | 范围 | 结果 | 证据 |
 | --- | --- | --- |
-| Rust 全量测试 | 通过 | 75 passed；1 个真实 Codex 登录测试 ignored |
-| Frontend | 通过 | 15 tests；TypeScript typecheck；Vite production build |
+| Rust 全量测试 | 通过 | 80 passed；1 个真实 Codex 登录测试 ignored |
+| Frontend | 通过 | 16 tests；TypeScript typecheck；Vite production build |
 | Rust 格式/静态检查 | 通过 | `cargo fmt --check`；all-target/all-feature Clippy with `-D warnings` |
 | Release bundle | 通过 | `npm run tauri build` 生成 release `.app` |
 | ad-hoc 签名 | 通过 | bundle `Identifier=com.zzjnotes.codex-usage-monitor`，flags `adhoc,runtime`；`codesign --verify --deep --strict` valid on disk / satisfies Designated Requirement |
 | Gatekeeper 本机评估 | 有条件通过 | `spctl --assess` 返回 accepted，但本机显示 `override=security disabled`，因此不能外推到其他 Mac；Developer ID/公证不在首版范围 |
 | 隐私回归 | 通过 | SQLite schema、实际隔离 DB bytes、CSV/JSON、UI state、diagnostics 和不存在的 log surface 扫描；未发现凭据或禁止的会话字段 |
 | Session fixture | 通过 | 仅使用仓库脱敏 active/archive JSONL；覆盖坏行、未知事件、截断、移动归档、增量、重复扫描、Token 子集语义和归属冻结 |
-| 故障恢复 | 通过 | wake/network cooldown、bounded backoff、single-flight、restart stale、暂停重启、通知持久去重、认证/transport failure、数据库失败 DTO 测试通过 |
+| 故障恢复 | 通过 | wake/network cooldown、bounded backoff、single-flight、restart stale、暂停重启、通知持久去重、认证/transport failure、保留期清理重试和数据库失败 DTO 测试通过 |
+| macOS 生命周期偏好 | 通过 | Dock 可见性与登录启动具备 UI、IPC、系统 adapter、持久化和保存失败补偿回滚 |
 | 网络/telemetry 静态扫描 | 通过 | 无通用 HTTP client、socket、telemetry/analytics/remote logging 依赖；直接外部进程仅 Codex app-server stdio 与 `pmset`；CSP 仅本地 IPC/asset |
 
 fixture 中的 `PRIVATE_FIXTURE_SENTINEL`、`/REDACTED/never-store` 等内容是有意放置的脱敏反例，用于证明输出不会保存正文或路径；它们不是用户真实会话。
@@ -68,7 +69,7 @@ src-tauri/target/release/bundle/macos/Codex Usage Monitor.app
 主可执行文件 SHA-256：
 
 ```text
-3f9c17fd5367b870ce485c086e2cd804d043739a0a7797d751de36a6982daa81
+21333f5ac2b6ec189b4f3aa1ce22adbd91a4ed4fa3cff551763bd93691e8a0bd
 ```
 
 构建产物未提交 Git；应从本提交在目标 Mac 重新执行 `npm ci && npm run tauri build`。Tauri 配置固定 `signingIdentity: "-"`，避免只签 Mach-O 而未签完整 bundle。

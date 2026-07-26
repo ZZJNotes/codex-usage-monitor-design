@@ -62,26 +62,50 @@ pub(crate) struct ApplicationStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StorageIssue {
-    pub(crate) detail: String,
+    pub(crate) detail: StorageIssueKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum StorageIssueKind {
+    #[serde(rename = "storageInitializationFailed")]
+    Initialization,
+    #[serde(rename = "storageWriteFailed")]
+    Write,
+    #[serde(rename = "retentionCleanupFailed")]
+    RetentionCleanup,
 }
 
 impl StorageIssue {
     fn initialization_failed() -> Self {
         Self {
-            detail: "storageInitializationFailed".to_string(),
+            detail: StorageIssueKind::Initialization,
         }
     }
 
     fn write_failed() -> Self {
         Self {
-            detail: "storageWriteFailed".to_string(),
+            detail: StorageIssueKind::Write,
         }
     }
 
     fn retention_cleanup_failed() -> Self {
         Self {
-            detail: "retentionCleanupFailed".to_string(),
+            detail: StorageIssueKind::RetentionCleanup,
         }
+    }
+}
+
+fn report_storage_write_failure(application_status: &RwLock<ApplicationStatus>) {
+    let mut status = application_status
+        .write()
+        .expect("application status poisoned");
+    if status.storage_issue.is_none()
+        || matches!(
+            status.storage_issue.as_ref().map(|issue| issue.detail),
+            Some(StorageIssueKind::Write)
+        )
+    {
+        status.storage_issue = Some(StorageIssue::write_failed());
     }
 }
 
@@ -96,14 +120,14 @@ fn recover_storage_after_successful_health_write(
         .expect("application status poisoned")
         .storage_issue
         .as_ref()
-        .map(|issue| issue.detail.clone());
-    let recovered_detail = match issue_detail.as_deref() {
-        Some("storageWriteFailed") => "storageWriteFailed",
-        Some("retentionCleanupFailed") => {
+        .map(|issue| issue.detail);
+    let recovered_detail = match issue_detail {
+        Some(StorageIssueKind::Write) => StorageIssueKind::Write,
+        Some(StorageIssueKind::RetentionCleanup) => {
             if governance.cleanup_retention(retention_days, now).is_err() {
                 return;
             }
-            "retentionCleanupFailed"
+            StorageIssueKind::RetentionCleanup
         }
         _ => return,
     };
@@ -346,10 +370,7 @@ pub fn run() {
                                 );
                             }
                             Err(_) => {
-                                application_status
-                                    .write()
-                                    .expect("application status poisoned")
-                                    .storage_issue = Some(StorageIssue::write_failed());
+                                report_storage_write_failure(&application_status);
                                 health.report_error("persist system health failed".to_string());
                             }
                             _ => {}
@@ -640,8 +661,37 @@ mod account_evidence_tests {
                 .expect("application status poisoned")
                 .storage_issue
                 .as_ref()
-                .map(|issue| issue.detail.as_str()),
-            Some("storageInitializationFailed")
+                .map(|issue| issue.detail),
+            Some(StorageIssueKind::Initialization)
+        );
+    }
+
+    #[test]
+    fn health_write_failure_does_not_replace_pending_retention_cleanup() {
+        let database = Database::in_memory().unwrap();
+        let governance = DataGovernanceService::new(database);
+        let status = RwLock::new(ApplicationStatus {
+            storage_issue: Some(StorageIssue::retention_cleanup_failed()),
+        });
+
+        report_storage_write_failure(&status);
+        assert_eq!(
+            status
+                .read()
+                .expect("application status poisoned")
+                .storage_issue
+                .as_ref()
+                .map(|issue| issue.detail),
+            Some(StorageIssueKind::RetentionCleanup)
+        );
+
+        recover_storage_after_successful_health_write(&status, &governance, 30, Utc::now());
+        assert!(
+            status
+                .read()
+                .expect("application status poisoned")
+                .storage_issue
+                .is_none()
         );
     }
 }
