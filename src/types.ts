@@ -28,3 +28,12 @@ export type LifecyclePreferences = {
   showInDock: boolean;
   launchAtLogin: boolean;
 };
+
+export type HealthPoint = {
+  observedAt: string;
+  metrics: HealthMetrics;
+};
+
+export type ApplicationStatus = {
+  storageError: string | null;
+};

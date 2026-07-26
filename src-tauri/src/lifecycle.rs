@@ -8,18 +8,59 @@ use crate::system_health::{SystemHealthService, SystemHealthState};
 #[serde(rename_all = "camelCase")]
 pub struct LifecyclePreferences {
     pub monitoring_paused: bool,
-    pub locale: String,
-    pub theme: String,
+    pub locale: Locale,
+    pub theme: Theme,
     pub show_in_dock: bool,
     pub launch_at_login: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Locale {
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en")]
+    En,
+}
+
+impl TryFrom<&str> for Locale {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "zh-CN" => Ok(Self::ZhCn),
+            "en" => Ok(Self::En),
+            _ => Err("unsupported locale".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    System,
+    Light,
+    Dark,
+}
+
+impl TryFrom<&str> for Theme {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "system" => Ok(Self::System),
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            _ => Err("unsupported theme".to_string()),
+        }
+    }
 }
 
 impl Default for LifecyclePreferences {
     fn default() -> Self {
         Self {
             monitoring_paused: false,
-            locale: "zh-CN".to_string(),
-            theme: "system".to_string(),
+            locale: Locale::ZhCn,
+            theme: Theme::System,
             show_in_dock: false,
             launch_at_login: false,
         }
@@ -57,17 +98,13 @@ impl LifecycleService {
     }
 
     pub fn set_theme(&self, theme: &str) -> Result<LifecyclePreferences, String> {
-        if !matches!(theme, "system" | "light" | "dark") {
-            return Err("unsupported theme".to_string());
-        }
-        self.update(|preferences| preferences.theme = theme.to_string())
+        let theme = Theme::try_from(theme)?;
+        self.update(|preferences| preferences.theme = theme)
     }
 
     pub fn set_locale(&self, locale: &str) -> Result<LifecyclePreferences, String> {
-        if !matches!(locale, "zh-CN" | "en") {
-            return Err("unsupported locale".to_string());
-        }
-        self.update(|preferences| preferences.locale = locale.to_string())
+        let locale = Locale::try_from(locale)?;
+        self.update(|preferences| preferences.locale = locale)
     }
 
     fn update(
@@ -159,5 +196,20 @@ mod tests {
 
         let restarted = LifecycleService::new(store).unwrap();
         assert!(restarted.preferences().monitoring_paused);
+    }
+
+    #[test]
+    fn rejects_unknown_locales_and_themes_at_the_service_boundary() {
+        let lifecycle = LifecycleService::new(Arc::new(MemoryPreferenceStore::default())).unwrap();
+
+        assert_eq!(
+            lifecycle.set_locale("fr"),
+            Err("unsupported locale".to_string())
+        );
+        assert_eq!(
+            lifecycle.set_theme("sepia"),
+            Err("unsupported theme".to_string())
+        );
+        assert_eq!(lifecycle.preferences(), LifecyclePreferences::default());
     }
 }

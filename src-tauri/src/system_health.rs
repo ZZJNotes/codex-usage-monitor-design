@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock},
+};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -67,6 +70,13 @@ pub enum SystemHealthState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemHealthPoint {
+    pub observed_at: DateTime<Utc>,
+    pub metrics: SystemHealthMetrics,
+}
+
 pub trait MetricSource: Send + Sync {
     fn collect(&self) -> Result<MetricSnapshot, String>;
 }
@@ -75,6 +85,7 @@ pub struct SystemHealthService {
     source: Arc<dyn MetricSource>,
     state: RwLock<SystemHealthState>,
     previous: RwLock<Option<MetricSnapshot>>,
+    history: RwLock<VecDeque<SystemHealthPoint>>,
 }
 
 impl SystemHealthService {
@@ -83,6 +94,7 @@ impl SystemHealthService {
             source,
             state: RwLock::new(SystemHealthState::Loading),
             previous: RwLock::new(None),
+            history: RwLock::new(VecDeque::with_capacity(1_800)),
         }
     }
 
@@ -90,24 +102,36 @@ impl SystemHealthService {
         self.state.read().expect("health state poisoned").clone()
     }
 
+    pub fn history(&self) -> Vec<SystemHealthPoint> {
+        self.history
+            .read()
+            .expect("health history poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn report_error(&self, message: String) {
+        let last_metrics = match self.latest() {
+            SystemHealthState::Ready { metrics, .. }
+            | SystemHealthState::Error {
+                last_metrics: Some(metrics),
+                ..
+            } => Some(metrics),
+            _ => None,
+        };
+        *self.state.write().expect("health state poisoned") = SystemHealthState::Error {
+            updated_at: Utc::now(),
+            message,
+            last_metrics,
+        };
+    }
+
     pub fn sample(&self) -> Result<SystemHealthState, String> {
         let snapshot = match self.source.collect() {
             Ok(snapshot) => snapshot,
             Err(message) => {
-                let last_metrics = match self.latest() {
-                    SystemHealthState::Ready { metrics, .. }
-                    | SystemHealthState::Error {
-                        last_metrics: Some(metrics),
-                        ..
-                    } => Some(metrics),
-                    _ => None,
-                };
-                let error_state = SystemHealthState::Error {
-                    updated_at: Utc::now(),
-                    message: message.clone(),
-                    last_metrics,
-                };
-                *self.state.write().expect("health state poisoned") = error_state;
+                self.report_error(message.clone());
                 return Err(message);
             }
         };
@@ -150,8 +174,17 @@ impl SystemHealthService {
         };
         let ready_state = SystemHealthState::Ready {
             updated_at: snapshot.observed_at,
-            metrics,
+            metrics: metrics.clone(),
         };
+        let mut history = self.history.write().expect("health history poisoned");
+        if history.len() == 1_800 {
+            history.pop_front();
+        }
+        history.push_back(SystemHealthPoint {
+            observed_at: snapshot.observed_at,
+            metrics,
+        });
+        drop(history);
         *self.previous.write().expect("previous sample poisoned") = Some(snapshot);
         *self.state.write().expect("health state poisoned") = ready_state.clone();
         Ok(ready_state)
@@ -220,5 +253,6 @@ mod tests {
         assert_eq!(metrics.network_up_bytes_per_second, 500.0);
         assert_eq!(metrics.memory_pressure, "normal");
         assert_eq!(metrics.battery_percent, Some(88.0));
+        assert_eq!(service.history().len(), 2);
     }
 }

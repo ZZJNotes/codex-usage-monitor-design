@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { monitorApi } from "./api";
 import { translator } from "./i18n";
-import type { HealthMetrics, HealthState, LifecyclePreferences } from "./types";
+import type {
+  ApplicationStatus,
+  HealthMetrics,
+  HealthPoint,
+  HealthState,
+  LifecyclePreferences,
+} from "./types";
 import "./app.css";
 
 const defaultPreferences: LifecyclePreferences = {
@@ -60,7 +66,15 @@ function MetricCard({
   );
 }
 
-function MetricsGrid({ metrics, locale }: { metrics: HealthMetrics; locale: "zh-CN" | "en" }) {
+function MetricsGrid({
+  metrics,
+  locale,
+  formatLocale,
+}: {
+  metrics: HealthMetrics;
+  locale: "zh-CN" | "en";
+  formatLocale: string;
+}) {
   const t = translator(locale);
   const pressure = t(metrics.memoryPressure);
   const battery = metrics.batteryPercent == null ? t("unavailable") : `${metrics.batteryPercent.toFixed(0)}%`;
@@ -72,24 +86,24 @@ function MetricsGrid({ metrics, locale }: { metrics: HealthMetrics; locale: "zh-
         value={pressure}
         tone={metrics.memoryPressure}
         help={t("memoryHelp", {
-          used: formatBytes(metrics.memoryUsedBytes, locale),
-          total: formatBytes(metrics.memoryTotalBytes, locale),
+          used: formatBytes(metrics.memoryUsedBytes, formatLocale),
+          total: formatBytes(metrics.memoryTotalBytes, formatLocale),
         })}
       />
       <MetricCard
         title={t("disk")}
-        value={formatBytes(metrics.diskAvailableBytes, locale)}
+        value={formatBytes(metrics.diskAvailableBytes, formatLocale)}
         help={t("diskHelp", {
-          available: formatBytes(metrics.diskAvailableBytes, locale),
-          total: formatBytes(metrics.diskTotalBytes, locale),
+          available: formatBytes(metrics.diskAvailableBytes, formatLocale),
+          total: formatBytes(metrics.diskTotalBytes, formatLocale),
         })}
       />
-      <MetricCard title={t("network")} value={formatBytes(metrics.networkDownBytesPerSecond, locale, "/s")} help={t("networkHelp")}>
+      <MetricCard title={t("network")} value={formatBytes(metrics.networkDownBytesPerSecond, formatLocale, "/s")} help={t("networkHelp")}>
         <div className="metric-split">
           <span>↓ {t("download")}</span>
-          <strong>{formatBytes(metrics.networkDownBytesPerSecond, locale, "/s")}</strong>
+          <strong>{formatBytes(metrics.networkDownBytesPerSecond, formatLocale, "/s")}</strong>
           <span>↑ {t("upload")}</span>
-          <strong>{formatBytes(metrics.networkUpBytesPerSecond, locale, "/s")}</strong>
+          <strong>{formatBytes(metrics.networkUpBytesPerSecond, formatLocale, "/s")}</strong>
         </div>
       </MetricCard>
       <MetricCard
@@ -97,7 +111,7 @@ function MetricsGrid({ metrics, locale }: { metrics: HealthMetrics; locale: "zh-
         value={battery}
         help={metrics.batteryCharging == null ? t("batteryHelp") : metrics.batteryCharging ? t("charging") : t("discharging")}
       />
-      <MetricCard title={t("uptime")} value={formatDuration(metrics.uptimeSeconds, locale)} help={t("uptimeHelp")} />
+      <MetricCard title={t("uptime")} value={formatDuration(metrics.uptimeSeconds, formatLocale)} help={t("uptimeHelp")} />
     </section>
   );
 }
@@ -105,8 +119,14 @@ function MetricsGrid({ metrics, locale }: { metrics: HealthMetrics; locale: "zh-
 export function App() {
   const [preferences, setPreferences] = useState<LifecyclePreferences>(defaultPreferences);
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
+  const [history, setHistory] = useState<HealthPoint[]>([]);
+  const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>({ storageError: null });
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
+  const formatLocale = useMemo(
+    () => window.navigator.language || preferences.locale,
+    [preferences.locale],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -121,13 +141,38 @@ export function App() {
     }
   }, []);
 
+  const refreshHistory = useCallback(async () => {
+    try {
+      setHistory(await monitorApi.getHealthHistory());
+    } catch (error) {
+      setPreferenceError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  const refreshPreferences = useCallback(async () => {
+    try {
+      const [nextPreferences, nextStatus] = await Promise.all([
+        monitorApi.getPreferences(),
+        monitorApi.getApplicationStatus(),
+      ]);
+      setPreferences(nextPreferences);
+      setApplicationStatus(nextStatus);
+    } catch (error) {
+      setPreferenceError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
   useEffect(() => {
-    void monitorApi
-      .getPreferences()
-      .then(setPreferences)
-      .catch((error) => setPreferenceError(error instanceof Error ? error.message : String(error)));
+    void refreshPreferences();
+    void refreshHistory();
     void refresh();
-  }, [refresh]);
+    const preferenceTimer = window.setInterval(() => void refreshPreferences(), 2_000);
+    const historyTimer = window.setInterval(() => void refreshHistory(), 60_000);
+    return () => {
+      window.clearInterval(preferenceTimer);
+      window.clearInterval(historyTimer);
+    };
+  }, [refresh, refreshHistory, refreshPreferences]);
 
   useEffect(() => {
     document.documentElement.lang = preferences.locale;
@@ -137,29 +182,26 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [preferences.locale, preferences.monitoringPaused, preferences.theme, refresh]);
 
-  async function updatePause() {
+  async function applyPreferenceMutation(request: Promise<LifecyclePreferences>) {
     try {
-      setPreferences(await monitorApi.setPaused(!preferences.monitoringPaused));
+      setPreferences(await request);
       setPreferenceError(null);
     } catch (error) {
       setPreferenceError(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function updateTheme(theme: LifecyclePreferences["theme"]) {
-    try {
-      setPreferences(await monitorApi.setTheme(theme));
-    } catch (error) {
-      setPreferenceError(error instanceof Error ? error.message : String(error));
-    }
+
+  function updatePause() {
+    return applyPreferenceMutation(monitorApi.setPaused(!preferences.monitoringPaused));
   }
 
-  async function updateLocale(locale: LifecyclePreferences["locale"]) {
-    try {
-      setPreferences(await monitorApi.setLocale(locale));
-    } catch (error) {
-      setPreferenceError(error instanceof Error ? error.message : String(error));
-    }
+  function updateTheme(theme: LifecyclePreferences["theme"]) {
+    return applyPreferenceMutation(monitorApi.setTheme(theme));
+  }
+
+  function updateLocale(locale: LifecyclePreferences["locale"]) {
+    return applyPreferenceMutation(monitorApi.setLocale(locale));
   }
 
   const shownMetrics = health.status === "ready" ? health.metrics : health.status === "error" ? health.lastMetrics : null;
@@ -194,14 +236,16 @@ export function App() {
             <span aria-hidden="true" />
             {preferences.monitoringPaused ? t("paused") : t("active")}
           </span>
-          {updatedAt && <time dateTime={updatedAt}>{t("updated")} {new Intl.DateTimeFormat(preferences.locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(updatedAt))}</time>}
+          {updatedAt && <time dateTime={updatedAt}>{t("updated")} {new Intl.DateTimeFormat(formatLocale, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(updatedAt))}</time>}
+          {history.length > 0 && <span>{t("samples", { count: new Intl.NumberFormat(formatLocale).format(history.length) })}</span>}
         </div>
 
         {preferenceError && <div className="error-banner" role="alert">{preferenceError}</div>}
+        {applicationStatus.storageError && <div className="error-banner" role="alert">{applicationStatus.storageError}</div>}
         {health.status === "loading" && !preferences.monitoringPaused && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
         {health.status === "loading" && preferences.monitoringPaused && <div className="state-panel" role="status">{t("empty")}</div>}
         {health.status === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{health.message}</span></div><button type="button" onClick={() => void refresh()}>{t("retry")}</button></div>}
-        {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} />}
+        {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
         {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
 
         <section className="settings-card" aria-labelledby="appearance-heading">

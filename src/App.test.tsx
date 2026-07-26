@@ -19,6 +19,12 @@ beforeEach(() => {
         launchAtLogin: false,
       });
     }
+    if (command === "get_application_status") {
+      return Promise.resolve({ storageError: null });
+    }
+    if (command === "get_system_health_history") {
+      return Promise.resolve([]);
+    }
     if (command === "get_system_health") {
       return Promise.resolve({
         status: "ready",

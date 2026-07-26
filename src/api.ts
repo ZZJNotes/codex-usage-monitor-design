@@ -1,8 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { HealthState, LifecyclePreferences } from "./types";
+import type {
+  ApplicationStatus,
+  HealthPoint,
+  HealthState,
+  LifecyclePreferences,
+} from "./types";
 
 export const monitorApi = {
   getHealth: () => invoke<HealthState>("get_system_health"),
+  getHealthHistory: () =>
+    invoke<HealthPoint[]>("get_system_health_history"),
+  getApplicationStatus: () =>
+    invoke<ApplicationStatus>("get_application_status"),
   getPreferences: () =>
     invoke<LifecyclePreferences>("get_lifecycle_preferences"),
   setPaused: (paused: boolean) =>
