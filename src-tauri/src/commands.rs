@@ -1,13 +1,14 @@
 use chrono::Utc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     AppState, ApplicationStatus,
+    governance::{CredentialDeletionStatus, ExportFormat, ExportReceipt, HistoryCleanupResult},
     lifecycle::{LifecyclePreferences, MenuBarPreferences},
     quota::{QuotaService, QuotaState},
     set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
-    token_usage::{TokenUsageFilters, TokenUsageState},
+    token_usage::{TokenUsageFilters, TokenUsageService, TokenUsageState},
     tray::{TrayMenuItems, update_tray},
 };
 
@@ -124,11 +125,23 @@ pub(crate) fn refresh_token_usage(
     filters: TokenUsageFilters,
     state: State<'_, AppState>,
 ) -> TokenUsageState {
-    if state.lifecycle.preferences().monitoring_paused {
-        return state.token_usage.query(filters).paused();
+    refresh_token_usage_service(
+        state.lifecycle.preferences().monitoring_paused,
+        &state.token_usage,
+        filters,
+    )
+}
+
+fn refresh_token_usage_service(
+    paused: bool,
+    token_usage: &TokenUsageService,
+    filters: TokenUsageFilters,
+) -> TokenUsageState {
+    if paused {
+        return token_usage.query(filters).paused();
     }
-    let _ = state.token_usage.scan();
-    state.token_usage.query(filters)
+    let _ = token_usage.scan();
+    token_usage.query(filters)
 }
 
 #[tauri::command]
@@ -180,6 +193,72 @@ pub(crate) fn set_theme(
 }
 
 #[tauri::command]
+pub(crate) fn set_retention_days(
+    retention_days: u32,
+    state: State<'_, AppState>,
+) -> Result<LifecyclePreferences, String> {
+    let preferences = state.lifecycle.set_retention_days(retention_days)?;
+    state
+        .governance
+        .cleanup_retention(preferences.retention_days, Utc::now())?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub(crate) fn cleanup_expired_history(
+    state: State<'_, AppState>,
+) -> Result<HistoryCleanupResult, String> {
+    state
+        .governance
+        .cleanup_retention(state.lifecycle.preferences().retention_days, Utc::now())
+}
+
+#[tauri::command]
+pub(crate) fn clear_history(state: State<'_, AppState>) -> Result<HistoryCleanupResult, String> {
+    let result = state.governance.clear_history()?;
+    state.health.clear_history();
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) fn delete_account_history(
+    account_key: String,
+    state: State<'_, AppState>,
+) -> Result<HistoryCleanupResult, String> {
+    state.governance.delete_account_history(&account_key)
+}
+
+#[tauri::command]
+pub(crate) fn export_statistics(
+    format: ExportFormat,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<ExportReceipt, String> {
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|_| "downloads directory is unavailable".to_string())?;
+    state
+        .governance
+        .export_to_directory(&downloads, "~/Downloads", format, Utc::now())
+}
+
+#[tauri::command]
+pub(crate) fn get_credential_deletion_status(
+    state: State<'_, AppState>,
+) -> CredentialDeletionStatus {
+    state.governance.credential_deletion_status()
+}
+
+#[tauri::command]
+pub(crate) fn request_credential_deletion(
+    account_key: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.governance.request_credential_deletion(&account_key)
+}
+
+#[tauri::command]
 pub(crate) fn set_locale(
     locale: String,
     state: State<'_, AppState>,
@@ -220,6 +299,10 @@ mod tests {
     use super::*;
     use crate::quota::{
         QuotaAccount, QuotaFailureKind, QuotaRefreshError, QuotaSnapshot, QuotaSource,
+    };
+    use crate::{
+        database::Database,
+        token_usage::{TokenUsageFilters, TokenUsageService},
     };
 
     struct CountingSource {
@@ -304,5 +387,34 @@ mod tests {
         assert!(dto.contains("\"reason\":\"transport\""));
         assert!(!dto.contains("secret diagnostic"));
         assert!(!dto.contains("abc123"));
+    }
+
+    #[test]
+    fn refresh_token_ipc_obeys_pause_without_ingesting_session_files() {
+        let database = Database::in_memory().unwrap();
+        let fixture_root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/token");
+        let service = TokenUsageService::new(database.clone(), vec![fixture_root]);
+
+        let state = refresh_token_usage_service(true, &service, TokenUsageFilters::default());
+
+        assert!(matches!(
+            state,
+            TokenUsageState::Stale {
+                reason: crate::token_usage::TokenUsageStaleReason::Paused,
+                ..
+            }
+        ));
+        database
+            .with_connection(|connection| {
+                let count: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM token_usage_events", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(count, 0);
+                Ok(())
+            })
+            .unwrap();
     }
 }

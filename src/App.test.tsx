@@ -30,6 +30,7 @@ beforeEach(() => {
   };
   preferencesResponse = {
     monitoringPaused: false,
+    retentionDays: 90,
     locale: "zh-CN",
     theme: "system",
     showInDock: false,
@@ -122,6 +123,22 @@ beforeEach(() => {
     }
     if (command === "reassign_token_session") {
       return Promise.resolve();
+    }
+    if (command === "get_credential_deletion_status") {
+      return Promise.resolve({ status: "unavailable", reason: "keychainIntegrationUnavailable" });
+    }
+    if (command === "set_retention_days") {
+      preferencesResponse = { ...preferencesResponse, retentionDays: 30 };
+      return Promise.resolve(preferencesResponse);
+    }
+    if (command === "cleanup_expired_history" || command === "clear_history") {
+      return Promise.resolve({ quotaSnapshotsDeleted: 1, tokenEventsDeleted: 2, systemAggregatesDeleted: 3, sessionAttributionsDeleted: 1, accountMetadataDeleted: 1 });
+    }
+    if (command === "export_statistics") {
+      return Promise.resolve({
+        filename: "codex-usage-2026-07-27.json",
+        destination: "~/Downloads/codex-usage-2026-07-27.json",
+      });
     }
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
@@ -331,4 +348,62 @@ test("manual refresh announces cooldown and English settings retain accessible n
   expect(screen.getByRole("group", { name: "Menu bar parameters" })).toBeVisible();
   expect(screen.getByLabelText("Pinned account")).toBeEnabled();
   expect(screen.getByText(/VoiceOver reads order controls/)).toBeVisible();
+});
+
+test("offers local retention cleanup and safe export while explaining credential deletion availability", async () => {
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "数据与隐私" })).toBeVisible();
+  expect(screen.getByLabelText("统计保留期")).toHaveValue("90");
+  expect(screen.getByRole("button", { name: "清理过期历史" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "清空全部历史" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "导出 JSON" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "导出 CSV" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "删除账户凭据" })).toBeDisabled();
+  expect(screen.getByText(/Keychain 多账户授权完成后才可用/)).toBeVisible();
+
+  fireEvent.change(screen.getByLabelText("统计保留期"), { target: { value: "30" } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_retention_days", { retentionDays: 30 }));
+  const historyReadsBeforeCleanup = invoke.mock.calls.filter(([command]) => command === "get_system_health_history").length;
+  fireEvent.click(screen.getByRole("button", { name: "清理过期历史" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("cleanup_expired_history"));
+  await waitFor(() => {
+    expect(invoke.mock.calls.filter(([command]) => command === "get_system_health_history").length).toBeGreaterThan(historyReadsBeforeCleanup);
+    expect(invoke).toHaveBeenCalledWith("get_token_usage", { filters: {} });
+    expect(invoke).toHaveBeenCalledWith("get_quota_state");
+  });
+  expect(await screen.findByText("本地数据操作已完成。")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "导出 JSON" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_statistics", { format: "json" }));
+  expect(await screen.findByText("导出成功：~/Downloads/codex-usage-2026-07-27.json")).toBeVisible();
+});
+
+test("explains that a persisted pause survives restart until the user resumes", async () => {
+  preferencesResponse = {
+    ...preferencesResponse,
+    monitoringPaused: true,
+  };
+
+  render(<App />);
+
+  expect(await screen.findByText(/重启后仍保持暂停/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "恢复监控" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "刷新额度" })).toBeDisabled();
+});
+
+test("UI state fixtures contain no credentials, session content, or work paths", () => {
+  const fixture = JSON.stringify({
+    quotaResponse,
+    preferencesResponse,
+    tokenUsage: {
+      status: "ready",
+      data: { totals: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, sessions: [], models: [], accounts: [] },
+    },
+    systemHealth: { status: "ready", metrics: { cpuPercent: 10, memoryPressure: "normal" } },
+    applicationStatus: { storageIssue: null },
+    exportReceipt: { filename: "codex-usage.json", destination: "~/Downloads/codex-usage.json" },
+  }).toLowerCase();
+  for (const prohibited of ["access_token", "refresh_token", "id_token", "bearer ", "sk-", "eyj", "prompt", "reply", "command", "attachment", "work_path", "/users/"]) {
+    expect(fixture).not.toContain(prohibited);
+  }
 });

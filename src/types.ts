@@ -29,6 +29,7 @@ export type HealthState =
 
 export type LifecyclePreferences = {
   monitoringPaused: boolean;
+  retentionDays: number;
   locale: "zh-CN" | "en";
   theme: "system" | "light" | "dark";
   showInDock: boolean;
@@ -50,6 +51,24 @@ export type MenuBarParameterId =
   | "battery"
   | "uptime"
   | `quotaWindow:${string}`;
+
+export type HistoryCleanupResult = {
+  quotaSnapshotsDeleted: number;
+  tokenEventsDeleted: number;
+  systemAggregatesDeleted: number;
+  sessionAttributionsDeleted: number;
+  accountMetadataDeleted: number;
+};
+
+export type ExportReceipt = {
+  filename: string;
+  destination: string;
+};
+
+export type CredentialDeletionStatus = {
+  status: "unavailable";
+  reason: "keychainIntegrationUnavailable";
+};
 
 export type HealthPoint = {
   observedAt: string;

@@ -303,6 +303,22 @@ mod tests {
     }
 
     #[test]
+    fn preferences_created_before_retention_support_load_with_the_safe_default() {
+        let database = Database::in_memory().unwrap();
+        database.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO app_preferences (id, value_json, updated_at_utc) VALUES (1, ?1, ?2)",
+                params![r#"{"monitoringPaused":true,"locale":"zh-CN","theme":"system","showInDock":false,"launchAtLogin":false}"#, Utc::now().to_rfc3339()],
+            ).map(|_| ()).map_err(|error| error.to_string())
+        }).unwrap();
+
+        let preferences = PreferenceStore::load(&database).unwrap().unwrap();
+
+        assert!(preferences.monitoring_paused);
+        assert_eq!(preferences.retention_days, 90);
+    }
+
+    #[test]
     fn latest_quota_snapshot_survives_service_recreation() {
         let database = Database::in_memory().unwrap();
         let snapshot = QuotaSnapshot {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { monitorApi } from "./api";
 import { translator } from "./i18n";
+import { DataGovernanceSection } from "./governance/DataGovernanceSection";
 import { TokenUsageSection } from "./token-usage/TokenUsageSection";
 import { useTokenUsage } from "./token-usage/useTokenUsage";
 import type {
@@ -17,6 +18,7 @@ import "./app.css";
 
 const defaultPreferences: LifecyclePreferences = {
   monitoringPaused: false,
+  retentionDays: 90,
   locale: "zh-CN",
   theme: "system",
   showInDock: false,
@@ -358,6 +360,14 @@ export function App() {
     return applyPreferenceMutation(monitorApi.setMenuBar(menuBar));
   }
 
+  function updateRetention(retentionDays: number) {
+    return applyPreferenceMutation(monitorApi.setRetentionDays(retentionDays));
+  }
+
+  const tokenData = tokenUsage.state.status === "ready" ? tokenUsage.state.data
+    : tokenUsage.state.status === "stale" ? tokenUsage.state.data
+      : tokenUsage.state.status === "error" ? tokenUsage.state.lastData : null;
+
   const healthView = toHealthView(health, preferences.monitoringPaused);
   const shownMetrics = healthView.metrics;
   const hasMetrics = shownMetrics && shownMetrics.memoryTotalBytes > 0 && shownMetrics.diskTotalBytes > 0;
@@ -501,6 +511,16 @@ export function App() {
         {healthView.notice === "stale" && <div className="error-banner" role="status">{t("stale")}</div>}
         {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
         {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
+
+        <DataGovernanceSection
+          locale={preferences.locale}
+          retentionDays={preferences.retentionDays}
+          accounts={tokenData?.accounts ?? []}
+          onRetentionChange={updateRetention}
+          onHistoryChanged={async () => {
+            await Promise.all([refreshHistory(), readQuota(), tokenUsage.refresh()]);
+          }}
+        />
 
         <section className="settings-card" aria-labelledby="appearance-heading">
           <div>

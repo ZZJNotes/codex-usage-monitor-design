@@ -1,5 +1,6 @@
 mod commands;
 pub mod database;
+pub mod governance;
 pub mod lifecycle;
 pub mod platform_metrics;
 pub mod quota;
@@ -19,12 +20,15 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use commands::{
-    get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, get_token_usage, reassign_token_session, recover_quota,
-    refresh_quota, refresh_system_health, refresh_token_usage, set_locale,
-    set_menu_bar_preferences, set_monitoring_paused, set_theme, show_dashboard,
+    cleanup_expired_history, clear_history, delete_account_history, export_statistics,
+    get_application_status, get_credential_deletion_status, get_lifecycle_preferences,
+    get_quota_state, get_system_health, get_system_health_history, get_token_usage,
+    reassign_token_session, recover_quota, refresh_quota, refresh_system_health,
+    refresh_token_usage, request_credential_deletion, set_locale, set_menu_bar_preferences,
+    set_monitoring_paused, set_retention_days, set_theme, show_dashboard,
 };
 use database::Database;
+use governance::DataGovernanceService;
 use lifecycle::LifecycleService;
 use platform_metrics::MacMetricSource;
 use quota::{CURRENT_CODEX_ACCOUNT_ID, QuotaRefreshCoordinator, QuotaService};
@@ -40,6 +44,7 @@ pub(crate) struct AppState {
     pub(crate) lifecycle: Arc<LifecycleService>,
     pub(crate) quota: Arc<QuotaService>,
     pub(crate) token_usage: Arc<TokenUsageService>,
+    pub(crate) governance: Arc<DataGovernanceService>,
     pub(crate) application_status: Arc<RwLock<ApplicationStatus>>,
 }
 
@@ -53,6 +58,20 @@ pub(crate) struct ApplicationStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StorageIssue {
     pub(crate) detail: String,
+}
+
+impl StorageIssue {
+    fn initialization_failed() -> Self {
+        Self {
+            detail: "storageInitializationFailed".to_string(),
+        }
+    }
+
+    fn write_failed() -> Self {
+        Self {
+            detail: "storageWriteFailed".to_string(),
+        }
+    }
 }
 
 struct CurrentQuotaAccountEvidence(Arc<QuotaService>);
@@ -96,7 +115,9 @@ pub(crate) fn set_monitoring_paused_with_account_evidence(
     paused: bool,
 ) -> Result<lifecycle::LifecyclePreferences, String> {
     if !paused {
-        quota.refresh_account_evidence();
+        return lifecycle.resume_after(|| {
+            quota.refresh_account_evidence();
+        });
     }
     lifecycle.set_monitoring_paused(paused)
 }
@@ -130,6 +151,13 @@ pub fn run() {
             set_locale,
             set_menu_bar_preferences,
             show_dashboard,
+            set_retention_days,
+            cleanup_expired_history,
+            clear_history,
+            delete_account_history,
+            export_statistics,
+            get_credential_deletion_status,
+            request_credential_deletion,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -138,15 +166,18 @@ pub fn run() {
                 .and_then(|_| Database::open(&data_dir.join("monitor.sqlite3")));
             let (database, storage_issue, ephemeral_storage) = match database_result {
                 Ok(database) => (database, None, false),
-                Err(error) => (
+                Err(_) => (
                     Database::in_memory().map_err(std::io::Error::other)?,
-                    Some(StorageIssue { detail: error }),
+                    Some(StorageIssue::initialization_failed()),
                     true,
                 ),
             };
             let lifecycle = Arc::new(
                 LifecycleService::new(Arc::new(database.clone())).map_err(std::io::Error::other)?,
             );
+            let governance = Arc::new(DataGovernanceService::new(database.clone()));
+            let _ =
+                governance.cleanup_retention(lifecycle.preferences().retention_days, Utc::now());
             let health = Arc::new(SystemHealthService::new(Arc::new(MacMetricSource::new())));
             let quota = Arc::new(match CodexAppServerSource::discover() {
                 Ok(source) => QuotaService::with_store(
@@ -174,6 +205,7 @@ pub fn run() {
                 lifecycle: lifecycle.clone(),
                 quota: quota.clone(),
                 token_usage: token_usage.clone(),
+                governance,
                 application_status: application_status.clone(),
             });
             let preferences = lifecycle.preferences();
@@ -204,14 +236,12 @@ pub fn run() {
                                     .expect("application status poisoned")
                                     .storage_issue = None;
                             }
-                            Err(error) => {
+                            Err(_) => {
                                 application_status
                                     .write()
                                     .expect("application status poisoned")
-                                    .storage_issue = Some(StorageIssue {
-                                    detail: error.clone(),
-                                });
-                                health.report_error(error);
+                                    .storage_issue = Some(StorageIssue::write_failed());
+                                health.report_error("persist system health failed".to_string());
                             }
                             _ => {}
                         }
@@ -339,7 +369,6 @@ mod account_evidence_tests {
     }
 
     struct ResumeOrderStore {
-        refreshed: Arc<AtomicBool>,
         saved: Mutex<lifecycle::LifecyclePreferences>,
     }
 
@@ -349,9 +378,6 @@ mod account_evidence_tests {
         }
 
         fn save(&self, preferences: &lifecycle::LifecyclePreferences) -> Result<(), String> {
-            if !preferences.monitoring_paused {
-                assert!(self.refreshed.load(Ordering::SeqCst));
-            }
             *self.saved.lock().unwrap() = preferences.clone();
             Ok(())
         }
@@ -370,7 +396,6 @@ mod account_evidence_tests {
     fn resuming_refreshes_account_evidence_before_monitoring_becomes_active() {
         let refreshed = Arc::new(AtomicBool::new(false));
         let store = Arc::new(ResumeOrderStore {
-            refreshed: refreshed.clone(),
             saved: Mutex::new(lifecycle::LifecyclePreferences {
                 monitoring_paused: true,
                 ..lifecycle::LifecyclePreferences::default()
@@ -379,12 +404,68 @@ mod account_evidence_tests {
         let lifecycle = LifecycleService::new(store).unwrap();
         let quota = QuotaService::new(
             "sanitized-account",
-            Arc::new(ResumeEvidenceSource(refreshed)),
+            Arc::new(ResumeEvidenceSource(refreshed.clone())),
         );
 
         let preferences =
             set_monitoring_paused_with_account_evidence(&lifecycle, &quota, false).unwrap();
 
         assert!(!preferences.monitoring_paused);
+        assert!(refreshed.load(Ordering::SeqCst));
+    }
+
+    struct FailingResumeStore;
+
+    impl lifecycle::PreferenceStore for FailingResumeStore {
+        fn load(&self) -> Result<Option<lifecycle::LifecyclePreferences>, String> {
+            Ok(Some(lifecycle::LifecyclePreferences {
+                monitoring_paused: true,
+                ..lifecycle::LifecyclePreferences::default()
+            }))
+        }
+
+        fn save(&self, _: &lifecycle::LifecyclePreferences) -> Result<(), String> {
+            Err("save failed".to_string())
+        }
+    }
+
+    #[test]
+    fn failed_resume_persistence_keeps_pause_gate_closed_without_network_access() {
+        let refreshed = Arc::new(AtomicBool::new(false));
+        let lifecycle = LifecycleService::new(Arc::new(FailingResumeStore)).unwrap();
+        let quota = QuotaService::new(
+            "sanitized-account",
+            Arc::new(ResumeEvidenceSource(refreshed.clone())),
+        );
+
+        assert_eq!(
+            set_monitoring_paused_with_account_evidence(&lifecycle, &quota, false),
+            Err("save failed".to_string())
+        );
+        assert!(lifecycle.preferences().monitoring_paused);
+        assert!(!refreshed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn diagnostics_expose_only_stable_codes_without_local_paths_or_secrets() {
+        let diagnostics = serde_json::to_string(&ApplicationStatus {
+            storage_issue: Some(StorageIssue::initialization_failed()),
+        })
+        .unwrap()
+        .to_ascii_lowercase();
+
+        assert!(diagnostics.contains("storageinitializationfailed"));
+        for prohibited in [
+            "/users/",
+            "access_token",
+            "refresh_token",
+            "bearer ",
+            "sk-",
+            "eyj",
+            "prompt",
+            "reply",
+        ] {
+            assert!(!diagnostics.contains(prohibited));
+        }
     }
 }
