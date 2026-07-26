@@ -34,10 +34,24 @@ function formatDuration(seconds: number, locale: string) {
   const days = Math.floor(seconds / 86_400);
   const hours = Math.floor((seconds % 86_400) / 3_600);
   const minutes = Math.floor((seconds % 3_600) / 60);
-  if (locale === "zh-CN") {
-    return days > 0 ? `${days} 天 ${hours} 小时` : `${hours} 小时 ${minutes} 分`;
-  }
-  return days > 0 ? `${days}d ${hours}h` : `${hours}h ${minutes}m`;
+  const unit = (value: number, name: "day" | "hour" | "minute") =>
+    new Intl.NumberFormat(locale, {
+      style: "unit",
+      unit: name,
+      unitDisplay: "short",
+      maximumFractionDigits: 0,
+    }).format(value);
+  return days > 0
+    ? `${unit(days, "day")} ${unit(hours, "hour")}`
+    : `${unit(hours, "hour")} ${unit(minutes, "minute")}`;
+}
+
+function formatPercent(value: number, locale: string, maximumFractionDigits: number) {
+  return new Intl.NumberFormat(locale, {
+    style: "percent",
+    maximumFractionDigits,
+    minimumFractionDigits: maximumFractionDigits,
+  }).format(value / 100);
 }
 
 function MetricCard({
@@ -77,10 +91,12 @@ function MetricsGrid({
 }) {
   const t = translator(locale);
   const pressure = t(metrics.memoryPressure);
-  const battery = metrics.batteryPercent == null ? t("unavailable") : `${metrics.batteryPercent.toFixed(0)}%`;
+  const battery = metrics.batteryPercent == null
+    ? t("unavailable")
+    : formatPercent(metrics.batteryPercent, formatLocale, 0);
   return (
     <section className="metrics-grid" aria-label={t("title")}>
-      <MetricCard title={t("cpu")} value={`${metrics.cpuPercent.toFixed(1)}%`} help={t("cpuHelp")} />
+      <MetricCard title={t("cpu")} value={formatPercent(metrics.cpuPercent, formatLocale, 1)} help={t("cpuHelp")} />
       <MetricCard
         title={t("memory")}
         value={pressure}
@@ -121,7 +137,7 @@ export function App() {
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [history, setHistory] = useState<HealthPoint[]>([]);
   const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>({ storageError: null });
-  const [preferenceError, setPreferenceError] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
     () => window.navigator.language || preferences.locale,
@@ -145,7 +161,7 @@ export function App() {
     try {
       setHistory(await monitorApi.getHealthHistory());
     } catch (error) {
-      setPreferenceError(error instanceof Error ? error.message : String(error));
+      setRequestError(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
@@ -158,7 +174,7 @@ export function App() {
       setPreferences(nextPreferences);
       setApplicationStatus(nextStatus);
     } catch (error) {
-      setPreferenceError(error instanceof Error ? error.message : String(error));
+      setRequestError(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
@@ -177,6 +193,7 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = preferences.locale;
     document.documentElement.dataset.theme = preferences.theme;
+    void refresh();
     if (preferences.monitoringPaused) return;
     const timer = window.setInterval(() => void refresh(), 2_000);
     return () => window.clearInterval(timer);
@@ -185,13 +202,11 @@ export function App() {
   async function applyPreferenceMutation(request: Promise<LifecyclePreferences>) {
     try {
       setPreferences(await request);
-      setPreferenceError(null);
+      setRequestError(null);
     } catch (error) {
-      setPreferenceError(error instanceof Error ? error.message : String(error));
+      setRequestError(error instanceof Error ? error.message : String(error));
     }
   }
-
-
   function updatePause() {
     return applyPreferenceMutation(monitorApi.setPaused(!preferences.monitoringPaused));
   }
@@ -204,9 +219,9 @@ export function App() {
     return applyPreferenceMutation(monitorApi.setLocale(locale));
   }
 
-  const shownMetrics = health.status === "ready" ? health.metrics : health.status === "error" ? health.lastMetrics : null;
+  const shownMetrics = health.status === "ready" || health.status === "stale" ? health.metrics : health.status === "error" ? health.lastMetrics : null;
   const hasMetrics = shownMetrics && shownMetrics.memoryTotalBytes > 0 && shownMetrics.diskTotalBytes > 0;
-  const updatedAt = health.status === "ready" || health.status === "error" ? health.updatedAt : null;
+  const updatedAt = health.status === "ready" || health.status === "stale" || health.status === "error" ? health.updatedAt : null;
 
   return (
     <div className="app-shell">
@@ -240,11 +255,12 @@ export function App() {
           {history.length > 0 && <span>{t("samples", { count: new Intl.NumberFormat(formatLocale).format(history.length) })}</span>}
         </div>
 
-        {preferenceError && <div className="error-banner" role="alert">{preferenceError}</div>}
+        {requestError && <div className="error-banner" role="alert">{requestError}</div>}
         {applicationStatus.storageError && <div className="error-banner" role="alert">{applicationStatus.storageError}</div>}
         {health.status === "loading" && !preferences.monitoringPaused && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
         {health.status === "loading" && preferences.monitoringPaused && <div className="state-panel" role="status">{t("empty")}</div>}
         {health.status === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{health.message}</span></div><button type="button" onClick={() => void refresh()}>{t("retry")}</button></div>}
+        {health.status === "stale" && !preferences.monitoringPaused && <div className="error-banner" role="status">{t("stale")}</div>}
         {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
         {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
 

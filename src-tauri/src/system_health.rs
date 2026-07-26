@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +63,11 @@ pub enum SystemHealthState {
         updated_at: DateTime<Utc>,
         metrics: SystemHealthMetrics,
     },
+    Stale {
+        updated_at: DateTime<Utc>,
+        metrics: SystemHealthMetrics,
+        reason: String,
+    },
     Error {
         updated_at: DateTime<Utc>,
         message: String,
@@ -103,17 +108,72 @@ impl SystemHealthService {
     }
 
     pub fn history(&self) -> Vec<SystemHealthPoint> {
-        self.history
-            .read()
-            .expect("health history poisoned")
-            .iter()
-            .cloned()
-            .collect()
+        self.history_at(Utc::now())
+    }
+
+    fn history_at(&self, now: DateTime<Utc>) -> Vec<SystemHealthPoint> {
+        let mut history = self.history.write().expect("health history poisoned");
+        let cutoff = now - ChronoDuration::hours(1);
+        while history
+            .front()
+            .is_some_and(|point| point.observed_at < cutoff)
+        {
+            history.pop_front();
+        }
+        let mut aggregates: Vec<(SystemHealthPoint, u64)> = Vec::new();
+        for point in history.iter() {
+            let bucket = point
+                .observed_at
+                .with_second(0)
+                .and_then(|value| value.with_nanosecond(0))
+                .unwrap_or(point.observed_at);
+            if let Some((aggregate, count)) = aggregates.last_mut()
+                && aggregate.observed_at == bucket
+            {
+                let next_count = *count + 1;
+                let average =
+                    |current: f64, next: f64| (current * *count as f64 + next) / next_count as f64;
+                aggregate.metrics.cpu_percent = average(
+                    aggregate.metrics.cpu_percent as f64,
+                    point.metrics.cpu_percent as f64,
+                ) as f32;
+                aggregate.metrics.memory_used_bytes = average(
+                    aggregate.metrics.memory_used_bytes as f64,
+                    point.metrics.memory_used_bytes as f64,
+                ) as u64;
+                aggregate.metrics.network_down_bytes_per_second = average(
+                    aggregate.metrics.network_down_bytes_per_second,
+                    point.metrics.network_down_bytes_per_second,
+                );
+                aggregate.metrics.network_up_bytes_per_second = average(
+                    aggregate.metrics.network_up_bytes_per_second,
+                    point.metrics.network_up_bytes_per_second,
+                );
+                aggregate.metrics.memory_total_bytes = point.metrics.memory_total_bytes;
+                aggregate.metrics.memory_pressure = point.metrics.memory_pressure.clone();
+                aggregate.metrics.disk_available_bytes = point.metrics.disk_available_bytes;
+                aggregate.metrics.disk_total_bytes = point.metrics.disk_total_bytes;
+                aggregate.metrics.battery_percent = point.metrics.battery_percent;
+                aggregate.metrics.battery_charging = point.metrics.battery_charging;
+                aggregate.metrics.uptime_seconds = point.metrics.uptime_seconds;
+                *count = next_count;
+            } else {
+                aggregates.push((
+                    SystemHealthPoint {
+                        observed_at: bucket,
+                        metrics: point.metrics.clone(),
+                    },
+                    1,
+                ));
+            }
+        }
+        aggregates.into_iter().map(|(point, _)| point).collect()
     }
 
     pub fn report_error(&self, message: String) {
         let last_metrics = match self.latest() {
             SystemHealthState::Ready { metrics, .. }
+            | SystemHealthState::Stale { metrics, .. }
             | SystemHealthState::Error {
                 last_metrics: Some(metrics),
                 ..
@@ -146,7 +206,7 @@ impl SystemHealthService {
             .map(|value| {
                 (snapshot.observed_at - value.observed_at).num_milliseconds() as f64 / 1_000.0
             })
-            .filter(|seconds| *seconds > 0.0);
+            .filter(|seconds| *seconds > 0.0 && *seconds <= 5.0);
         let rate = |current: u64, prior: Option<u64>| match (prior, elapsed_seconds) {
             (Some(prior), Some(seconds)) if current >= prior => (current - prior) as f64 / seconds,
             _ => 0.0,
@@ -177,7 +237,11 @@ impl SystemHealthService {
             metrics: metrics.clone(),
         };
         let mut history = self.history.write().expect("health history poisoned");
-        if history.len() == 1_800 {
+        let cutoff = snapshot.observed_at - ChronoDuration::hours(1);
+        while history
+            .front()
+            .is_some_and(|point| point.observed_at < cutoff)
+        {
             history.pop_front();
         }
         history.push_back(SystemHealthPoint {
@@ -253,6 +317,30 @@ mod tests {
         assert_eq!(metrics.network_up_bytes_per_second, 500.0);
         assert_eq!(metrics.memory_pressure, "normal");
         assert_eq!(metrics.battery_percent, Some(88.0));
-        assert_eq!(service.history().len(), 2);
+        let now = Utc.with_ymd_and_hms(2026, 7, 26, 10, 0, 2).unwrap();
+        assert_eq!(service.history_at(now).len(), 1);
+    }
+
+    #[test]
+    fn prunes_history_by_time_and_ignores_network_deltas_across_long_gaps() {
+        let mut old = snapshot(0, 1_000, 2_000);
+        old.observed_at = Utc.with_ymd_and_hms(2026, 7, 26, 8, 59, 0).unwrap();
+        let mut recent = snapshot(0, 9_000, 8_000);
+        recent.observed_at = Utc.with_ymd_and_hms(2026, 7, 26, 10, 0, 0).unwrap();
+        let source = Arc::new(SequenceSource {
+            snapshots: Mutex::new(vec![old, recent]),
+        });
+        let service = SystemHealthService::new(source);
+
+        service.sample().unwrap();
+        let state = service.sample().unwrap();
+
+        let SystemHealthState::Ready { metrics, .. } = state else {
+            panic!("expected ready state");
+        };
+        assert_eq!(metrics.network_down_bytes_per_second, 0.0);
+        assert_eq!(metrics.network_up_bytes_per_second, 0.0);
+        let now = Utc.with_ymd_and_hms(2026, 7, 26, 10, 0, 0).unwrap();
+        assert_eq!(service.history_at(now).len(), 1);
     }
 }

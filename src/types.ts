@@ -15,6 +15,12 @@ export type HealthState =
   | { status: "loading" }
   | { status: "ready"; updatedAt: string; metrics: HealthMetrics }
   | {
+      status: "stale";
+      updatedAt: string;
+      metrics: HealthMetrics;
+      reason: "paused" | "outdated";
+    }
+  | {
       status: "error";
       updatedAt: string;
       message: string;
