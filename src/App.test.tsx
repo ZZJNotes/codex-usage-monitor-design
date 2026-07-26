@@ -73,6 +73,7 @@ test("shows a textual loading state before rendering understandable system metri
   expect(screen.getByText("12.5%")).toBeVisible();
   expect(screen.getByText("正常")).toBeVisible();
   expect(screen.getByText("Codex 额度")).toBeVisible();
+  expect(screen.getByText(/这不是多账户管理/)).toBeVisible();
   expect(screen.getByText("85% 剩余")).toBeVisible();
   expect(screen.getByRole("button", { name: "暂停监控" })).toBeEnabled();
 });

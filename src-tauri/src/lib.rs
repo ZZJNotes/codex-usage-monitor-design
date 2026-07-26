@@ -3,6 +3,7 @@ pub mod database;
 pub mod lifecycle;
 pub mod platform_metrics;
 pub mod quota;
+mod quota_app_server;
 pub mod system_health;
 mod tray;
 
@@ -21,7 +22,8 @@ use commands::{
 use database::Database;
 use lifecycle::LifecycleService;
 use platform_metrics::MacMetricSource;
-use quota::{CodexAppServerSource, QuotaService};
+use quota::QuotaService;
+use quota_app_server::CodexAppServerSource;
 use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{ActivationPolicy, AppHandle, Manager, Runtime, WindowEvent};
@@ -89,8 +91,14 @@ pub fn run() {
             );
             let health = Arc::new(SystemHealthService::new(Arc::new(MacMetricSource::new())));
             let quota = Arc::new(match CodexAppServerSource::discover() {
-                Ok(source) => QuotaService::new(Arc::new(source)),
-                Err(message) => QuotaService::unavailable(message),
+                Ok(source) => {
+                    QuotaService::with_store(Arc::new(source), Arc::new(database.clone()))
+                        .map_err(std::io::Error::other)?
+                }
+                Err(message) => {
+                    QuotaService::unavailable_with_store(message, Arc::new(database.clone()))
+                        .map_err(std::io::Error::other)?
+                }
             });
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
             app.manage(AppState {

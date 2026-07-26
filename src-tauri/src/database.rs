@@ -8,6 +8,7 @@ use rusqlite::{Connection, params};
 
 use crate::{
     lifecycle::{LifecyclePreferences, PreferenceStore},
+    quota::{QuotaSnapshot, QuotaStore},
     system_health::SystemHealthMetrics,
 };
 
@@ -59,6 +60,12 @@ impl Database {
                    battery_percent_last REAL,
                    uptime_seconds_last INTEGER NOT NULL,
                    PRIMARY KEY (bucket_kind, bucket_start_utc)
+                 );
+                 CREATE TABLE IF NOT EXISTS quota_snapshots (
+                   account_key TEXT NOT NULL,
+                   observed_at_utc TEXT NOT NULL,
+                   snapshot_json TEXT NOT NULL,
+                   PRIMARY KEY (account_key, observed_at_utc)
                  );",
             )
             .map_err(|error| error.to_string())
@@ -151,6 +158,45 @@ impl PreferenceStore for Database {
     }
 }
 
+impl QuotaStore for Database {
+    fn load_latest(&self) -> Result<Option<QuotaSnapshot>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?;
+        let result = connection.query_row(
+            "SELECT snapshot_json FROM quota_snapshots ORDER BY observed_at_utc DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(value) => serde_json::from_str(&value)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn save(&self, snapshot: &QuotaSnapshot) -> Result<(), String> {
+        let value = serde_json::to_string(snapshot).map_err(|error| error.to_string())?;
+        self.connection
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?
+            .execute(
+                "INSERT OR REPLACE INTO quota_snapshots (account_key, observed_at_utc, snapshot_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    snapshot.account.display_name,
+                    snapshot.updated_at.to_rfc3339(),
+                    value
+                ],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,8 +210,30 @@ mod tests {
             ..LifecyclePreferences::default()
         };
 
-        database.save(&preferences).unwrap();
+        PreferenceStore::save(&database, &preferences).unwrap();
 
         assert_eq!(database.load().unwrap(), Some(preferences));
+    }
+
+    #[test]
+    fn latest_quota_snapshot_survives_service_recreation() {
+        let database = Database::in_memory().unwrap();
+        let snapshot = QuotaSnapshot {
+            account: crate::quota::QuotaAccount {
+                display_name: "user@example.com".to_string(),
+                plan_type: "plus".to_string(),
+            },
+            windows: vec![crate::quota::QuotaWindow {
+                name: "codex · primary".to_string(),
+                remaining_percent: 80,
+                resets_at: None,
+                window_duration_minutes: Some(300),
+            }],
+            updated_at: Utc::now(),
+        };
+
+        QuotaStore::save(&database, &snapshot).unwrap();
+
+        assert_eq!(QuotaStore::load_latest(&database).unwrap(), Some(snapshot));
     }
 }

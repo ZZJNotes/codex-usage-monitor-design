@@ -1,25 +1,17 @@
-use std::{
-    fs,
-    io::{BufRead, BufReader, Read, Write},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex, RwLock, mpsc},
-    thread,
-    time::Duration,
-};
+use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaAccount {
     pub display_name: String,
     pub plan_type: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
     pub name: String,
@@ -28,7 +20,7 @@ pub struct QuotaWindow {
     pub window_duration_minutes: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaSnapshot {
     pub account: QuotaAccount,
@@ -53,8 +45,14 @@ pub trait QuotaSource: Send + Sync {
     fn refresh(&self) -> Result<QuotaSnapshot, String>;
 }
 
+pub trait QuotaStore: Send + Sync {
+    fn load_latest(&self) -> Result<Option<QuotaSnapshot>, String>;
+    fn save(&self, snapshot: &QuotaSnapshot) -> Result<(), String>;
+}
+
 pub struct QuotaService {
     source: Arc<dyn QuotaSource>,
+    store: Option<Arc<dyn QuotaStore>>,
     state: RwLock<QuotaState>,
     refresh_lock: Mutex<()>,
 }
@@ -63,9 +61,27 @@ impl QuotaService {
     pub fn new(source: Arc<dyn QuotaSource>) -> Self {
         Self {
             source,
+            store: None,
             state: RwLock::new(QuotaState::Loading),
             refresh_lock: Mutex::new(()),
         }
+    }
+
+    pub fn with_store(
+        source: Arc<dyn QuotaSource>,
+        store: Arc<dyn QuotaStore>,
+    ) -> Result<Self, String> {
+        let initial = store
+            .load_latest()?
+            .map_or(QuotaState::Loading, |snapshot| QuotaState::Ready {
+                snapshot,
+            });
+        Ok(Self {
+            source,
+            store: Some(store),
+            state: RwLock::new(initial),
+            refresh_lock: Mutex::new(()),
+        })
     }
 
     pub fn unavailable(message: String) -> Self {
@@ -75,6 +91,22 @@ impl QuotaService {
             last_snapshot: None,
         };
         service
+    }
+
+    pub fn unavailable_with_store(
+        message: String,
+        store: Arc<dyn QuotaStore>,
+    ) -> Result<Self, String> {
+        let last_snapshot = store.load_latest()?;
+        Ok(Self {
+            source: Arc::new(UnavailableQuotaSource(message.clone())),
+            store: Some(store),
+            state: RwLock::new(QuotaState::Error {
+                message,
+                last_snapshot,
+            }),
+            refresh_lock: Mutex::new(()),
+        })
     }
 
     pub fn latest(&self) -> QuotaState {
@@ -88,6 +120,16 @@ impl QuotaService {
             .expect("quota refresh lock poisoned");
         match self.source.refresh() {
             Ok(snapshot) => {
+                if let Some(store) = &self.store
+                    && let Err(message) = store.save(&snapshot)
+                {
+                    let state = QuotaState::Error {
+                        message,
+                        last_snapshot: Some(snapshot),
+                    };
+                    *self.state.write().expect("quota state poisoned") = state.clone();
+                    return state;
+                }
                 let state = QuotaState::Ready { snapshot };
                 *self.state.write().expect("quota state poisoned") = state.clone();
                 state
@@ -110,6 +152,21 @@ impl QuotaService {
             }
         }
     }
+
+    pub fn paused(&self) -> QuotaState {
+        let last_snapshot = match self.latest() {
+            QuotaState::Ready { snapshot }
+            | QuotaState::Error {
+                last_snapshot: Some(snapshot),
+                ..
+            } => Some(snapshot),
+            _ => None,
+        };
+        QuotaState::Error {
+            message: "monitoring_paused".to_string(),
+            last_snapshot,
+        }
+    }
 }
 
 struct UnavailableQuotaSource(String);
@@ -120,186 +177,7 @@ impl QuotaSource for UnavailableQuotaSource {
     }
 }
 
-pub struct CodexAppServerSource {
-    executable: PathBuf,
-}
-
-impl CodexAppServerSource {
-    pub fn discover() -> Result<Self, String> {
-        resolve_codex_executable()
-            .map(|executable| Self { executable })
-            .ok_or_else(|| "找不到 Codex CLI；请确认已安装并可从终端运行 codex".to_string())
-    }
-
-    fn request(&self) -> Result<(Value, Value), String> {
-        let mut command = Command::new(&self.executable);
-        command.args(["app-server", "--stdio"]);
-        if let Some(directory) = self.executable.parent() {
-            let mut paths = vec![directory.to_path_buf()];
-            if let Some(existing) = std::env::var_os("PATH") {
-                paths.extend(std::env::split_paths(&existing));
-            }
-            if let Ok(path) = std::env::join_paths(paths) {
-                command.env("PATH", path);
-            }
-        }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("无法启动 Codex app-server：{error}"))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "无法连接 Codex app-server 输入".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "无法连接 Codex app-server 输出".to_string())?;
-        let mut stderr = child.stderr.take();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    let _ = sender.send(value);
-                }
-            }
-        });
-
-        let result = (|| {
-            send_request(
-                &mut stdin,
-                serde_json::json!({
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "clientInfo": { "name": "codex-usage-monitor", "version": env!("CARGO_PKG_VERSION") },
-                        "capabilities": { "experimentalApi": true }
-                    }
-                }),
-            )?;
-            wait_for_result(&receiver, 1)?;
-            send_request(
-                &mut stdin,
-                serde_json::json!({ "method": "initialized", "params": {} }),
-            )?;
-            send_request(
-                &mut stdin,
-                serde_json::json!({ "id": 2, "method": "account/read", "params": { "refreshToken": false } }),
-            )?;
-            send_request(
-                &mut stdin,
-                serde_json::json!({ "id": 3, "method": "account/rateLimits/read" }),
-            )?;
-            let mut account = None;
-            let mut rate_limits = None;
-            while account.is_none() || rate_limits.is_none() {
-                let message = receiver
-                    .recv_timeout(Duration::from_secs(15))
-                    .map_err(|_| "读取 ChatGPT 额度超时".to_string())?;
-                match message.get("id").and_then(Value::as_i64) {
-                    Some(2) => account = Some(result_value(message)?),
-                    Some(3) => rate_limits = Some(result_value(message)?),
-                    _ => {}
-                }
-            }
-            Ok((account.unwrap(), rate_limits.unwrap()))
-        })();
-        drop(stdin);
-        let _ = child.kill();
-        let _ = child.wait();
-        let mut stderr_text = String::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_string(&mut stderr_text);
-        }
-        match result {
-            Err(message) if !stderr_text.trim().is_empty() => {
-                Err(format!("{message}：{}", stderr_text.trim()))
-            }
-            result => result,
-        }
-    }
-}
-
-impl QuotaSource for CodexAppServerSource {
-    fn refresh(&self) -> Result<QuotaSnapshot, String> {
-        let (account, rate_limits) = self.request()?;
-        normalize_responses(&account, &rate_limits, Utc::now())
-    }
-}
-
-fn send_request(stdin: &mut impl Write, request: Value) -> Result<(), String> {
-    writeln!(stdin, "{request}").map_err(|error| error.to_string())?;
-    stdin.flush().map_err(|error| error.to_string())
-}
-
-fn wait_for_result(receiver: &mpsc::Receiver<Value>, id: i64) -> Result<Value, String> {
-    loop {
-        let message = receiver
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|_| "初始化 Codex app-server 超时".to_string())?;
-        if message.get("id").and_then(Value::as_i64) == Some(id) {
-            return result_value(message);
-        }
-    }
-}
-
-fn result_value(message: Value) -> Result<Value, String> {
-    if let Some(error) = message.get("error") {
-        return Err(error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Codex app-server 返回错误")
-            .to_string());
-    }
-    message
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "Codex app-server 响应缺少 result".to_string())
-}
-
-fn resolve_codex_executable() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CODEX_USAGE_MONITOR_CODEX_PATH") {
-        let path = PathBuf::from(path);
-        if is_executable_file(&path) {
-            return Some(path);
-        }
-    }
-    if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|directory| directory.join("codex"))
-            .find(|path| is_executable_file(path))
-    }) {
-        return Some(path);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let versions = home.join(".nvm/versions/node");
-    let mut candidates = fs::read_dir(versions)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join("bin/codex"))
-        .filter(|path| is_executable_file(path))
-        .collect::<Vec<_>>();
-    candidates.sort();
-    if let Some(path) = candidates.pop() {
-        return Some(path);
-    }
-    [
-        PathBuf::from("/opt/homebrew/bin/codex"),
-        PathBuf::from("/usr/local/bin/codex"),
-    ]
-    .into_iter()
-    .find(|path| is_executable_file(path))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-fn normalize_responses(
+pub(crate) fn normalize_responses(
     account_result: &Value,
     rate_limit_result: &Value,
     observed_at: DateTime<Utc>,
@@ -307,7 +185,7 @@ fn normalize_responses(
     let account = account_result
         .get("account")
         .filter(|account| account.get("type").and_then(Value::as_str) == Some("chatgpt"))
-        .ok_or_else(|| "当前 Codex 未使用 ChatGPT 账户登录".to_string())?;
+        .ok_or_else(|| "The current Codex login is not a ChatGPT account".to_string())?;
     let display_name = account
         .get("email")
         .and_then(Value::as_str)
@@ -343,21 +221,32 @@ fn normalize_responses(
             .and_then(Value::as_str)
             .or_else(|| snapshot.get("limitId").and_then(Value::as_str))
             .unwrap_or(bucket_key);
-        for window_name in ["primary", "secondary"] {
-            let Some(window) = snapshot.get(window_name).filter(|value| !value.is_null()) else {
-                continue;
-            };
+        let mut named_windows = snapshot
+            .as_object()
+            .into_iter()
+            .flat_map(|fields| fields.iter())
+            .filter(|(_, value)| value.get("usedPercent").is_some())
+            .collect::<Vec<_>>();
+        named_windows.sort_by_key(|(name, _)| match name.as_str() {
+            "primary" => (0, name.as_str()),
+            "secondary" => (1, name.as_str()),
+            _ => (2, name.as_str()),
+        });
+        for (window_name, window) in named_windows {
             let used_percent = window
                 .get("usedPercent")
                 .and_then(Value::as_i64)
                 .filter(|value| (0..=100).contains(value))
-                .ok_or_else(|| format!("{bucket_name} {window_name} 的额度百分比无效"))?;
+                .ok_or_else(|| {
+                    format!("{bucket_name} {window_name} has an invalid quota percentage")
+                })?;
             let resets_at = window
                 .get("resetsAt")
                 .and_then(Value::as_i64)
                 .map(|timestamp| {
-                    DateTime::from_timestamp(timestamp, 0)
-                        .ok_or_else(|| format!("{bucket_name} {window_name} 的重置时间无效"))
+                    DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+                        format!("{bucket_name} {window_name} has an invalid reset time")
+                    })
                 })
                 .transpose()?;
             windows.push(QuotaWindow {
@@ -384,6 +273,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::quota_app_server::CodexAppServerSource;
+
+    struct StaticQuotaSource(QuotaSnapshot);
+
+    impl QuotaSource for StaticQuotaSource {
+        fn refresh(&self) -> Result<QuotaSnapshot, String> {
+            Ok(self.0.clone())
+        }
+    }
 
     #[test]
     fn normalizes_named_windows_to_remaining_percentage() {
@@ -430,6 +328,69 @@ mod tests {
         });
 
         assert!(normalize_responses(&account, &rate_limits, Utc::now()).is_err());
+    }
+
+    #[test]
+    fn preserves_additional_named_windows_from_future_protocol_versions() {
+        let account = json!({
+            "account": { "type": "chatgpt", "email": "user@example.com", "planType": "team" }
+        });
+        let rate_limits = json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": { "usedPercent": 10 },
+                "monthly": { "usedPercent": 25, "windowDurationMins": 43200 },
+                "metadata": { "future": true }
+            }
+        });
+
+        let snapshot = normalize_responses(&account, &rate_limits, Utc::now()).unwrap();
+
+        assert_eq!(
+            snapshot
+                .windows
+                .iter()
+                .map(|window| window.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex · primary", "codex · monthly"]
+        );
+        assert_eq!(snapshot.windows[1].remaining_percent, 75);
+    }
+
+    #[test]
+    fn restores_the_last_snapshot_when_the_cli_is_unavailable_after_restart() {
+        let database = Arc::new(crate::database::Database::in_memory().unwrap());
+        let snapshot = QuotaSnapshot {
+            account: QuotaAccount {
+                display_name: "user@example.com".to_string(),
+                plan_type: "plus".to_string(),
+            },
+            windows: vec![],
+            updated_at: Utc::now(),
+        };
+        let service = QuotaService::with_store(
+            Arc::new(StaticQuotaSource(snapshot.clone())),
+            database.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            service.refresh(),
+            QuotaState::Ready {
+                snapshot: snapshot.clone()
+            }
+        );
+
+        let restored =
+            QuotaService::unavailable_with_store("Codex CLI is unavailable".to_string(), database)
+                .unwrap();
+
+        assert_eq!(
+            restored.latest(),
+            QuotaState::Error {
+                message: "Codex CLI is unavailable".to_string(),
+                last_snapshot: Some(snapshot),
+            }
+        );
     }
 
     #[test]
