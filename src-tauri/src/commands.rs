@@ -5,7 +5,7 @@ use crate::{
     AppState, ApplicationStatus,
     lifecycle::LifecyclePreferences,
     quota::QuotaState,
-    show_main_window,
+    set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     token_usage::{TokenUsageFilters, TokenUsageState},
     tray::{TrayMenuItems, update_tray_locale, update_tray_text},
@@ -117,10 +117,8 @@ pub(crate) fn set_monitoring_paused(
     state: State<'_, AppState>,
     tray: State<'_, TrayMenuItems>,
 ) -> Result<LifecyclePreferences, String> {
-    if !paused {
-        state.quota.refresh();
-    }
-    let preferences = state.lifecycle.set_monitoring_paused(paused)?;
+    let preferences =
+        set_monitoring_paused_with_account_evidence(&state.lifecycle, &state.quota, paused)?;
     update_tray_text(&tray, preferences.locale, preferences.monitoring_paused);
     Ok(preferences)
 }

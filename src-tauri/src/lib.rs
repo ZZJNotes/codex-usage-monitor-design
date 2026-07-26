@@ -89,6 +89,17 @@ fn current_quota_account_evidence(
     })
 }
 
+pub(crate) fn set_monitoring_paused_with_account_evidence(
+    lifecycle: &LifecycleService,
+    quota: &QuotaService,
+    paused: bool,
+) -> Result<lifecycle::LifecyclePreferences, String> {
+    if !paused {
+        quota.refresh();
+    }
+    lifecycle.set_monitoring_paused(paused)
+}
+
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -254,20 +265,29 @@ pub fn run() {
 
 #[cfg(test)]
 mod account_evidence_tests {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use chrono::{Duration, Utc};
 
     use super::*;
 
+    fn quota_snapshot(updated_at: chrono::DateTime<Utc>) -> quota::QuotaSnapshot {
+        quota::QuotaSnapshot {
+            account: quota::QuotaAccount {
+                display_name: "sanitized@example.com".to_string(),
+                plan_type: "plus".to_string(),
+            },
+            windows: Vec::new(),
+            updated_at,
+        }
+    }
+
     fn quota_state(updated_at: chrono::DateTime<Utc>) -> quota::QuotaState {
         quota::QuotaState::Ready {
-            snapshot: quota::QuotaSnapshot {
-                account: quota::QuotaAccount {
-                    display_name: "sanitized@example.com".to_string(),
-                    plan_type: "plus".to_string(),
-                },
-                windows: Vec::new(),
-                updated_at,
-            },
+            snapshot: quota_snapshot(updated_at),
         }
     }
 
@@ -293,5 +313,52 @@ mod account_evidence_tests {
             )
             .is_none()
         );
+    }
+
+    struct ResumeOrderStore {
+        refreshed: Arc<AtomicBool>,
+        saved: Mutex<lifecycle::LifecyclePreferences>,
+    }
+
+    impl lifecycle::PreferenceStore for ResumeOrderStore {
+        fn load(&self) -> Result<Option<lifecycle::LifecyclePreferences>, String> {
+            Ok(Some(self.saved.lock().unwrap().clone()))
+        }
+
+        fn save(&self, preferences: &lifecycle::LifecyclePreferences) -> Result<(), String> {
+            if !preferences.monitoring_paused {
+                assert!(self.refreshed.load(Ordering::SeqCst));
+            }
+            *self.saved.lock().unwrap() = preferences.clone();
+            Ok(())
+        }
+    }
+
+    struct ResumeEvidenceSource(Arc<AtomicBool>);
+
+    impl quota::QuotaSource for ResumeEvidenceSource {
+        fn refresh(&self) -> Result<quota::QuotaSnapshot, String> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(quota_snapshot(Utc::now()))
+        }
+    }
+
+    #[test]
+    fn resuming_refreshes_account_evidence_before_monitoring_becomes_active() {
+        let refreshed = Arc::new(AtomicBool::new(false));
+        let store = Arc::new(ResumeOrderStore {
+            refreshed: refreshed.clone(),
+            saved: Mutex::new(lifecycle::LifecyclePreferences {
+                monitoring_paused: true,
+                ..lifecycle::LifecyclePreferences::default()
+            }),
+        });
+        let lifecycle = LifecycleService::new(store).unwrap();
+        let quota = QuotaService::new(Arc::new(ResumeEvidenceSource(refreshed)));
+
+        let preferences =
+            set_monitoring_paused_with_account_evidence(&lifecycle, &quota, false).unwrap();
+
+        assert!(!preferences.monitoring_paused);
     }
 }

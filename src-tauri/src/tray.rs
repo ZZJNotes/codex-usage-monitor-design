@@ -5,7 +5,9 @@ use tauri::{
     tray::TrayIconBuilder,
 };
 
-use crate::{AppState, lifecycle::Locale, show_main_window};
+use crate::{
+    AppState, lifecycle::Locale, set_monitoring_paused_with_account_evidence, show_main_window,
+};
 
 pub(crate) struct TrayMenuItems {
     open: MenuItem<tauri::Wry>,
@@ -80,7 +82,11 @@ pub(crate) fn setup_tray(
             "toggle-pause" => {
                 let state = app.state::<AppState>();
                 let paused = !state.lifecycle.preferences().monitoring_paused;
-                if let Ok(preferences) = state.lifecycle.set_monitoring_paused(paused) {
+                if let Ok(preferences) = set_monitoring_paused_with_account_evidence(
+                    &state.lifecycle,
+                    &state.quota,
+                    paused,
+                ) {
                     let tray = app.state::<TrayMenuItems>();
                     update_tray_text(&tray, preferences.locale, preferences.monitoring_paused);
                 }
