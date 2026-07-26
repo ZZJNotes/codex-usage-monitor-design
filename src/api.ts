@@ -8,6 +8,8 @@ import type {
   HistoryCleanupResult,
   LifecyclePreferences,
   MenuBarPreferences,
+  NotificationPolicy,
+  NotificationStatus,
   QuotaState,
   TokenUsageFilters,
   TokenUsageState,
@@ -21,6 +23,8 @@ export const monitorApi = {
     invoke<HealthPoint[]>("get_system_health_history"),
   getApplicationStatus: () =>
     invoke<ApplicationStatus>("get_application_status"),
+  getNotificationStatus: () =>
+    invoke<NotificationStatus>("get_notification_status"),
   getQuota: () => invoke<QuotaState>("get_quota_state"),
   refreshQuota: () => invoke<QuotaState>("refresh_quota"),
   getTokenUsage: (filters: TokenUsageFilters = {}) =>
@@ -53,4 +57,6 @@ export const monitorApi = {
     invoke<CredentialDeletionStatus>("get_credential_deletion_status"),
   requestCredentialDeletion: (accountKey: string) =>
     invoke<void>("request_credential_deletion", { accountKey }),
+  setNotifications: (notifications: NotificationPolicy) =>
+    invoke<LifecyclePreferences>("set_notification_preferences", { notifications }),
 };

@@ -7,6 +7,7 @@ use chrono::{DateTime, Days, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{
+    notification::NotificationPolicy,
     quota::AccountId,
     system_health::{SystemHealthService, SystemHealthState},
 };
@@ -23,6 +24,8 @@ pub struct LifecyclePreferences {
     pub launch_at_login: bool,
     #[serde(default)]
     pub menu_bar: MenuBarPreferences,
+    #[serde(default)]
+    pub notifications: NotificationPolicy,
 }
 
 pub const MAX_MENU_BAR_PARAMETERS: u8 = 5;
@@ -193,6 +196,7 @@ impl Default for LifecyclePreferences {
             show_in_dock: false,
             launch_at_login: false,
             menu_bar: MenuBarPreferences::default(),
+            notifications: NotificationPolicy::default(),
         }
     }
 }
@@ -270,6 +274,14 @@ impl LifecycleService {
     ) -> Result<LifecyclePreferences, String> {
         validate_menu_bar(&menu_bar)?;
         self.update(|preferences| preferences.menu_bar = menu_bar)
+    }
+
+    pub fn set_notifications(
+        &self,
+        notifications: NotificationPolicy,
+    ) -> Result<LifecyclePreferences, String> {
+        notifications.validate()?;
+        self.update(|preferences| preferences.notifications = notifications)
     }
 
     fn update(
@@ -512,5 +524,22 @@ mod tests {
 
         assert!(!worker.join().unwrap().monitoring_paused);
         assert!(!lifecycle.preferences().monitoring_paused);
+    }
+
+    #[test]
+    fn notification_defaults_are_actionable_and_invalid_thresholds_are_rejected() {
+        let lifecycle = LifecycleService::new(Arc::new(MemoryPreferenceStore::default())).unwrap();
+
+        assert_eq!(
+            lifecycle.preferences().notifications.quota_thresholds,
+            vec![20, 10, 0]
+        );
+        let mut invalid = lifecycle.preferences().notifications;
+        invalid.quota_thresholds = vec![20, 20];
+
+        assert_eq!(
+            lifecycle.set_notifications(invalid),
+            Err("quota thresholds must be unique".to_string())
+        );
     }
 }

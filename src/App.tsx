@@ -11,6 +11,7 @@ import type {
   HealthState,
   LifecyclePreferences,
   MenuBarParameterId,
+  NotificationStatus,
   QuotaSnapshot,
   QuotaState,
 } from "./types";
@@ -27,6 +28,12 @@ const defaultPreferences: LifecyclePreferences = {
     parameterIds: ["cpu", "memoryPressure", "diskAvailable"],
     displayLimit: 3,
     pinnedAccountId: null,
+  },
+  notifications: {
+    enabled: true,
+    quotaThresholds: [20, 10, 0],
+    diskAvailablePercentThreshold: 10,
+    consecutiveRefreshFailures: 3,
   },
 };
 
@@ -215,10 +222,16 @@ export function App() {
   const [health, setHealth] = useState<HealthState>({ status: "loading" });
   const [history, setHistory] = useState<HealthPoint[]>([]);
   const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>({ storageIssue: null });
+  const [notificationStatus, setNotificationStatus] = useState<NotificationStatus>({
+    activeConditions: [],
+    lastNotification: null,
+    deliveryError: null,
+  });
   const [quota, setQuota] = useState<QuotaState>({ status: "loading" });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const tokenUsage = useTokenUsage();
   const [quotaClock, setQuotaClock] = useState(() => Date.now());
+  const [quotaThresholdDraft, setQuotaThresholdDraft] = useState("20, 10, 0");
   const [requestError, setRequestError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
@@ -249,12 +262,14 @@ export function App() {
 
   const refreshPreferences = useCallback(async () => {
     try {
-      const [nextPreferences, nextStatus] = await Promise.all([
+      const [nextPreferences, nextStatus, nextNotificationStatus] = await Promise.all([
         monitorApi.getPreferences(),
         monitorApi.getApplicationStatus(),
+        monitorApi.getNotificationStatus(),
       ]);
       setPreferences(nextPreferences);
       setApplicationStatus(nextStatus);
+      setNotificationStatus(nextNotificationStatus);
     } catch (error) {
       setRequestError(errorMessage(error));
     }
@@ -328,6 +343,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    setQuotaThresholdDraft(preferences.notifications.quotaThresholds.join(", "));
+  }, [preferences.notifications.quotaThresholds]);
+
+  useEffect(() => {
     document.documentElement.lang = preferences.locale;
     document.documentElement.dataset.theme = preferences.theme;
     void refresh();
@@ -367,6 +386,26 @@ export function App() {
   const tokenData = tokenUsage.state.status === "ready" ? tokenUsage.state.data
     : tokenUsage.state.status === "stale" ? tokenUsage.state.data
       : tokenUsage.state.status === "error" ? tokenUsage.state.lastData : null;
+
+  function updateNotifications(notifications: LifecyclePreferences["notifications"]) {
+    return applyPreferenceMutation(monitorApi.setNotifications(notifications));
+  }
+
+  function activeConditionLabel(condition: NotificationStatus["activeConditions"][number]) {
+    if (condition.kind === "disk") {
+      return t("notificationDiskActive", {
+        threshold: String(preferences.notifications.diskAvailablePercentThreshold),
+      });
+    }
+    if (condition.kind === "memoryPressure") return t("notificationMemoryActive");
+    if (condition.kind === "authentication") return t("notificationAuthActive");
+    if (condition.kind === "refreshExpired") {
+      return t("notificationRefreshActive", {
+        count: String(preferences.notifications.consecutiveRefreshFailures),
+      });
+    }
+    return condition.label;
+  }
 
   const healthView = toHealthView(health, preferences.monitoringPaused);
   const shownMetrics = healthView.metrics;
@@ -540,6 +579,86 @@ export function App() {
               <option value="dark">{t("dark")}</option>
             </select>
           </label>
+        </section>
+
+        <section className="notification-settings" aria-labelledby="notification-heading">
+          <div>
+            <p className="eyebrow">{t("notificationEyebrow")}</p>
+            <h2 id="notification-heading">{t("notificationTitle")}</h2>
+            <p>{t("notificationHelp")}</p>
+          </div>
+          <div className="notification-controls">
+            <label className="notification-toggle">
+              <input
+                type="checkbox"
+                checked={preferences.notifications.enabled}
+                onChange={(event) => void updateNotifications({
+                  ...preferences.notifications,
+                  enabled: event.target.checked,
+                })}
+              />
+              {t("notificationEnabled")}
+            </label>
+            <label>{t("notificationQuotaThresholds")}
+              <input
+                type="text"
+                aria-describedby="notification-threshold-help"
+                value={quotaThresholdDraft}
+                onChange={(event) => setQuotaThresholdDraft(event.target.value)}
+                onBlur={(event) => {
+                  const parts = event.target.value.split(",").map((value) => value.trim());
+                  const thresholds = parts
+                    .map((value) => Number(value))
+                    .filter((value, index) => parts[index].length > 0 && Number.isInteger(value) && value >= 0 && value <= 100);
+                  if (thresholds.length > 0 && thresholds.length === parts.length && new Set(thresholds).size === thresholds.length) {
+                    void updateNotifications({
+                      ...preferences.notifications,
+                      quotaThresholds: thresholds,
+                    });
+                  } else {
+                    setQuotaThresholdDraft(preferences.notifications.quotaThresholds.join(", "));
+                  }
+                }}
+              />
+            </label>
+            <label>{t("notificationDiskThreshold")}
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={preferences.notifications.diskAvailablePercentThreshold}
+                onChange={(event) => void updateNotifications({
+                  ...preferences.notifications,
+                  diskAvailablePercentThreshold: Number(event.target.value),
+                })}
+              />
+            </label>
+            <label>{t("notificationRefreshFailures")}
+              <input
+                type="number"
+                min="1"
+                max="20"
+                value={preferences.notifications.consecutiveRefreshFailures}
+                onChange={(event) => void updateNotifications({
+                  ...preferences.notifications,
+                  consecutiveRefreshFailures: Number(event.target.value),
+                })}
+              />
+            </label>
+          </div>
+          <p id="notification-threshold-help" className="accessibility-note">{t("notificationThresholdHelp")}</p>
+          {notificationStatus.deliveryError && <div className="error-banner" role="alert"><div><strong>{t("notificationDeliveryError")}</strong><span>{notificationStatus.deliveryError}. {t("notificationDeliveryRecovery")}</span></div></div>}
+          <div className="notification-status" aria-live="polite">
+            <h3>{t("notificationActive")}</h3>
+            {notificationStatus.activeConditions.length === 0
+              ? <p>{t("notificationNone")}</p>
+              : <ul>{notificationStatus.activeConditions.map((condition) => <li key={condition.key}>{activeConditionLabel(condition)}</li>)}</ul>}
+            {notificationStatus.lastNotification && <article>
+              <strong>{t("notificationLast")}: {notificationStatus.lastNotification.title}</strong>
+              <p>{notificationStatus.lastNotification.body}</p>
+              <time dateTime={notificationStatus.lastNotification.sentAt}>{new Intl.DateTimeFormat(formatLocale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(notificationStatus.lastNotification.sentAt))}</time>
+            </article>}
+          </div>
         </section>
 
         <section className="menu-bar-settings" aria-labelledby="menu-bar-heading">

@@ -8,6 +8,7 @@ use rusqlite::{Connection, params};
 
 use crate::{
     lifecycle::{LifecyclePreferences, PreferenceStore},
+    notification::{NotificationStore, PersistedNotificationState},
     quota::{QuotaSnapshot, QuotaStore},
     system_health::SystemHealthMetrics,
 };
@@ -77,6 +78,11 @@ impl Database {
                    observed_at_utc TEXT NOT NULL,
                    snapshot_json TEXT NOT NULL,
                    PRIMARY KEY (account_key, observed_at_utc)
+                 );
+                 CREATE TABLE IF NOT EXISTS notification_state (
+                   id INTEGER PRIMARY KEY CHECK (id = 1),
+                   value_json TEXT NOT NULL,
+                   updated_at_utc TEXT NOT NULL
                  );
                  CREATE TABLE IF NOT EXISTS token_usage_events (
                    event_key TEXT PRIMARY KEY,
@@ -260,6 +266,43 @@ impl QuotaStore for Database {
     }
 }
 
+impl NotificationStore for Database {
+    fn load_notification_state(&self) -> Result<Option<PersistedNotificationState>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?;
+        let result = connection.query_row(
+            "SELECT value_json FROM notification_state WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(value) => serde_json::from_str(&value)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn save_notification_state(&self, state: &PersistedNotificationState) -> Result<(), String> {
+        let value = serde_json::to_string(state).map_err(|error| error.to_string())?;
+        self.connection
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?
+            .execute(
+                "INSERT INTO notification_state (id, value_json, updated_at_utc)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET value_json = excluded.value_json,
+                   updated_at_utc = excluded.updated_at_utc",
+                params![value, Utc::now().to_rfc3339()],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +395,19 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<QuotaSnapshot>(&stored).unwrap(),
             snapshot
+        );
+    }
+
+    #[test]
+    fn notification_deduplication_state_survives_service_recreation() {
+        let database = Database::in_memory().unwrap();
+        let state = crate::notification::PersistedNotificationState::default();
+
+        crate::notification::NotificationStore::save_notification_state(&database, &state).unwrap();
+
+        assert_eq!(
+            crate::notification::NotificationStore::load_notification_state(&database).unwrap(),
+            Some(state)
         );
     }
 }

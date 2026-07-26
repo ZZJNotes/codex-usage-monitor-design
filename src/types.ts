@@ -35,6 +35,29 @@ export type LifecyclePreferences = {
   showInDock: boolean;
   launchAtLogin: boolean;
   menuBar: MenuBarPreferences;
+  notifications: NotificationPolicy;
+};
+
+export type NotificationPolicy = {
+  enabled: boolean;
+  quotaThresholds: number[];
+  diskAvailablePercentThreshold: number;
+  consecutiveRefreshFailures: number;
+};
+
+export type NotificationStatus = {
+  activeConditions: Array<{
+    key: string;
+    kind: "quota" | "authentication" | "refreshExpired" | "disk" | "memoryPressure";
+    label: string;
+    accountId: string | null;
+  }>;
+  lastNotification: {
+    sentAt: string;
+    title: string;
+    body: string;
+  } | null;
+  deliveryError: string | null;
 };
 
 export type MenuBarPreferences = {
