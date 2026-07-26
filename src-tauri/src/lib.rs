@@ -7,6 +7,7 @@ mod quota_app_server;
 pub mod system_health;
 pub mod token_usage;
 mod tray;
+mod tray_view;
 
 use std::{
     fs,

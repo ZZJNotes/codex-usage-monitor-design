@@ -37,10 +37,19 @@ export type LifecyclePreferences = {
 };
 
 export type MenuBarPreferences = {
-  parameterIds: string[];
+  parameterIds: MenuBarParameterId[];
   displayLimit: number;
   pinnedAccountId: string | null;
 };
+
+export type MenuBarParameterId =
+  | "cpu"
+  | "memoryPressure"
+  | "diskAvailable"
+  | "networkDown"
+  | "battery"
+  | "uptime"
+  | `quotaWindow:${string}`;
 
 export type HealthPoint = {
   observedAt: string;

@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{
     quota::AccountId,
@@ -27,18 +27,81 @@ pub const MAX_MENU_BAR_PARAMETERS: u8 = 5;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MenuBarPreferences {
-    pub parameter_ids: Vec<String>,
+    pub parameter_ids: Vec<MenuBarParameter>,
     pub display_limit: u8,
     pub pinned_account_id: Option<AccountId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MenuBarParameter {
+    Cpu,
+    MemoryPressure,
+    DiskAvailable,
+    NetworkDown,
+    Battery,
+    Uptime,
+    QuotaWindow(String),
+}
+
+impl MenuBarParameter {
+    pub fn as_id(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Cpu => "cpu".into(),
+            Self::MemoryPressure => "memoryPressure".into(),
+            Self::DiskAvailable => "diskAvailable".into(),
+            Self::NetworkDown => "networkDown".into(),
+            Self::Battery => "battery".into(),
+            Self::Uptime => "uptime".into(),
+            Self::QuotaWindow(name) => format!("quotaWindow:{name}").into(),
+        }
+    }
+}
+
+impl TryFrom<String> for MenuBarParameter {
+    type Error = String;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        match id.as_str() {
+            "cpu" => Ok(Self::Cpu),
+            "memoryPressure" => Ok(Self::MemoryPressure),
+            "diskAvailable" => Ok(Self::DiskAvailable),
+            "networkDown" => Ok(Self::NetworkDown),
+            "battery" => Ok(Self::Battery),
+            "uptime" => Ok(Self::Uptime),
+            _ => id
+                .strip_prefix("quotaWindow:")
+                .filter(|name| !name.trim().is_empty() && name.len() <= 116)
+                .map(|name| Self::QuotaWindow(name.to_string()))
+                .ok_or_else(|| format!("unsupported menu bar parameter: {id}")),
+        }
+    }
+}
+
+impl Serialize for MenuBarParameter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.as_id())
+    }
+}
+
+impl<'de> Deserialize<'de> for MenuBarParameter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
 }
 
 impl Default for MenuBarPreferences {
     fn default() -> Self {
         Self {
             parameter_ids: vec![
-                "cpu".into(),
-                "memoryPressure".into(),
-                "diskAvailable".into(),
+                MenuBarParameter::Cpu,
+                MenuBarParameter::MemoryPressure,
+                MenuBarParameter::DiskAvailable,
             ],
             display_limit: 3,
             pinned_account_id: None,
@@ -192,21 +255,12 @@ fn validate_menu_bar(menu_bar: &MenuBarPreferences) -> Result<(), String> {
         return Err("too many menu bar parameters".to_string());
     }
     let mut unique = std::collections::HashSet::new();
-    for id in &menu_bar.parameter_ids {
-        if id.len() > 128 {
-            return Err("menu bar parameter id is too long".to_string());
-        }
-        let supported = matches!(
-            id.as_str(),
-            "cpu" | "memoryPressure" | "diskAvailable" | "networkDown" | "battery" | "uptime"
-        ) || id
-            .strip_prefix("quotaWindow:")
-            .is_some_and(|name| !name.trim().is_empty());
-        if !supported {
-            return Err(format!("unsupported menu bar parameter: {id}"));
-        }
-        if !unique.insert(id.clone()) {
-            return Err(format!("duplicate menu bar parameter: {id}"));
+    for parameter in &menu_bar.parameter_ids {
+        if !unique.insert(parameter) {
+            return Err(format!(
+                "duplicate menu bar parameter: {}",
+                parameter.as_id()
+            ));
         }
     }
     if menu_bar
@@ -318,13 +372,19 @@ mod tests {
         let lifecycle = LifecycleService::new(store.clone()).unwrap();
         let saved = lifecycle
             .set_menu_bar(MenuBarPreferences {
-                parameter_ids: vec!["quotaWindow:codex primary".into(), "cpu".into()],
+                parameter_ids: vec![
+                    "quotaWindow:codex primary".to_string().try_into().unwrap(),
+                    MenuBarParameter::Cpu,
+                ],
                 display_limit: 2,
                 pinned_account_id: Some("account-42".into()),
             })
             .unwrap();
 
-        assert_eq!(saved.menu_bar.parameter_ids[0], "quotaWindow:codex primary");
+        assert_eq!(
+            saved.menu_bar.parameter_ids[0].as_id(),
+            "quotaWindow:codex primary"
+        );
         assert_eq!(
             saved
                 .menu_bar
@@ -338,7 +398,7 @@ mod tests {
         assert!(
             lifecycle
                 .set_menu_bar(MenuBarPreferences {
-                    parameter_ids: vec!["cpu".into(), "cpu".into()],
+                    parameter_ids: vec![MenuBarParameter::Cpu, MenuBarParameter::Cpu],
                     display_limit: 2,
                     pinned_account_id: None,
                 })
@@ -348,11 +408,12 @@ mod tests {
         assert!(
             lifecycle
                 .set_menu_bar(MenuBarPreferences {
-                    parameter_ids: vec!["secretTokens".into()],
+                    parameter_ids: vec![MenuBarParameter::Cpu],
                     display_limit: MAX_MENU_BAR_PARAMETERS + 1,
                     pinned_account_id: None,
                 })
                 .is_err()
         );
+        assert!(serde_json::from_str::<MenuBarParameter>(r#""secretTokens""#).is_err());
     }
 }

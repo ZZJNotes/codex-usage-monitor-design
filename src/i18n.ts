@@ -109,6 +109,7 @@ const messages = {
     menuBarOrder: "当前菜单栏顺序",
     pinnedUnavailable: "置顶账户当前不可用",
     pinnedUnavailableHelp: "不会改用其他账户额度；完成独立多账户授权后才能恢复此置顶账户。",
+    managedAccountsBlocked: "当前账户仅作为只读回退；托管账户置顶需先完成账户管理与独立授权，这里不会把当前账户伪装成托管账户。",
   },
   en: {
     appName: "Codex Usage Monitor",
@@ -218,6 +219,7 @@ const messages = {
     menuBarOrder: "Current menu bar order",
     pinnedUnavailable: "Pinned account is unavailable",
     pinnedUnavailableHelp: "Quota will not fall back to another account. Independent multi-account authorization is required to restore this pinned account.",
+    managedAccountsBlocked: "The current account is a read-only fallback. Pinning a managed account requires account management and independent authorization; this view never presents the current account as managed.",
   },
 } as const;
 

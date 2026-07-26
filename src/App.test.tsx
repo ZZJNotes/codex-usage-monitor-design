@@ -111,7 +111,7 @@ beforeEach(() => {
   });
 });
 
-test("configures an ordered limited menu bar and pins only real account metadata", async () => {
+test("configures an ordered limited menu bar without inventing managed account metadata", async () => {
   invoke.mockImplementation((command: string, args?: unknown) => {
     if (command === "set_menu_bar_preferences") {
       const menuBar = (args as { menuBar: unknown }).menuBar;
@@ -130,20 +130,19 @@ test("configures an ordered limited menu bar and pins only real account metadata
   render(<App />);
 
   expect(await screen.findByRole("group", { name: "菜单栏参数" })).toBeVisible();
-  expect(screen.getByRole("option", { name: /user@example.com/ })).toHaveValue("user@example.com");
+  expect(screen.queryByRole("option", { name: /user@example.com/ })).not.toBeInTheDocument();
+  expect(screen.getByText(/不会把当前账户伪装成托管账户/)).toBeVisible();
   fireEvent.click(screen.getByRole("checkbox", { name: "codex · primary" }));
   await waitFor(() => expect(screen.getByRole("checkbox", { name: "codex · primary" })).toBeChecked());
   fireEvent.click(screen.getByRole("button", { name: "上移 codex · primary" }));
   await waitFor(() => expect(screen.getByLabelText("第 3 位")).toHaveTextContent("3"));
   fireEvent.change(screen.getByLabelText("最多显示数量"), { target: { value: "2" } });
   await waitFor(() => expect(screen.getByLabelText("最多显示数量")).toHaveValue("2"));
-  fireEvent.change(screen.getByLabelText("置顶账户"), { target: { value: "user@example.com" } });
-
   await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("set_menu_bar_preferences", {
     menuBar: {
       parameterIds: ["cpu", "memoryPressure", "quotaWindow:codex · primary", "diskAvailable"],
       displayLimit: 2,
-      pinnedAccountId: "user@example.com",
+      pinnedAccountId: null,
     },
   }));
   expect(screen.getByText(/键盘操作/)).toBeVisible();

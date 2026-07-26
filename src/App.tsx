@@ -9,6 +9,7 @@ import type {
   HealthPoint,
   HealthState,
   LifecyclePreferences,
+  MenuBarParameterId,
   QuotaSnapshot,
   QuotaState,
 } from "./types";
@@ -380,27 +381,27 @@ export function App() {
             : quotaView.error === "invalidResponse"
               ? t("quotaCompatibilityRecovery")
               : t("quotaRecovery");
-  const menuBarOptions = [
+  const menuBarOptions: Array<{ id: MenuBarParameterId; label: string }> = [
     { id: "cpu", label: t("cpu") },
     { id: "memoryPressure", label: t("memory") },
     { id: "diskAvailable", label: t("disk") },
     { id: "networkDown", label: t("network") },
     { id: "battery", label: t("battery") },
     { id: "uptime", label: t("uptime") },
-    ...(quotaSnapshot?.windows.map((window) => ({ id: `quotaWindow:${window.name}`, label: window.name })) ?? []),
+    ...(quotaSnapshot?.windows.map((window) => ({ id: `quotaWindow:${window.name}` as const, label: window.name })) ?? []),
   ];
   const optionLabels = new Map(menuBarOptions.map((option) => [option.id, option.label]));
   const pinnedAccountUnavailable = preferences.menuBar.pinnedAccountId != null
     && preferences.menuBar.pinnedAccountId !== quotaSnapshot?.account.id;
 
-  function toggleMenuBarParameter(id: string, selected: boolean) {
+  function toggleMenuBarParameter(id: MenuBarParameterId, selected: boolean) {
     const parameterIds = selected
       ? [...preferences.menuBar.parameterIds, id]
       : preferences.menuBar.parameterIds.filter((current) => current !== id);
     return updateMenuBar({ ...preferences.menuBar, parameterIds });
   }
 
-  function moveMenuBarParameter(id: string, direction: -1 | 1) {
+  function moveMenuBarParameter(id: MenuBarParameterId, direction: -1 | 1) {
     const parameterIds = [...preferences.menuBar.parameterIds];
     const from = parameterIds.indexOf(id);
     const to = from + direction;
@@ -524,7 +525,6 @@ export function App() {
                 })}
               >
                 <option value="">{t("currentAccountFallback")}</option>
-                {quotaSnapshot && <option value={quotaSnapshot.account.id}>{quotaSnapshot.account.displayName} · {quotaSnapshot.account.planType}</option>}
               </select>
             </label>
             <label>{t("menuBarLimit")}
@@ -536,6 +536,7 @@ export function App() {
               </select>
             </label>
           </div>
+          <p className="accessibility-note" role="note">{t("managedAccountsBlocked")}</p>
           {pinnedAccountUnavailable && <div className="error-banner" role="status"><div><strong>{t("pinnedUnavailable")}</strong><span>{t("pinnedUnavailableHelp")}</span></div></div>}
           <fieldset className="menu-bar-parameters">
             <legend>{t("menuBarParameters")}</legend>
