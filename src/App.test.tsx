@@ -91,3 +91,57 @@ test("shows a textual loading state before rendering understandable system metri
   expect(screen.getByText("85% 剩余")).toBeVisible();
   expect(screen.getByRole("button", { name: "暂停监控" })).toBeEnabled();
 });
+
+test("keeps the last quota visible and explains transport staleness without showing zero", async () => {
+  quotaResponse = {
+    status: "stale",
+    reason: "transport",
+    snapshot: {
+      account: { id: "account-1", displayName: "user@example.com", planType: "plus" },
+      windows: [{
+        name: "codex · primary",
+        remainingPercent: 73,
+        resetsAt: null,
+        windowDurationMinutes: 300,
+      }],
+      updatedAt: "2026-07-26T12:00:00Z",
+    },
+    failedAt: "2026-07-26T12:10:00Z",
+    retryAt: "2026-07-26T12:10:30Z",
+  };
+
+  render(<App />);
+
+  expect(await screen.findByText("额度数据已过期")).toBeVisible();
+  expect(screen.getByText(/网络不可用/)).toBeVisible();
+  expect(screen.getByText("73% 剩余")).toBeVisible();
+  expect(screen.queryByText("0% 剩余")).not.toBeInTheDocument();
+});
+
+test("explains that authentication failure needs account reauthorization", async () => {
+  quotaResponse = {
+    status: "error",
+    reason: "reauthorization",
+    lastSnapshot: null,
+    failedAt: "2026-07-26T12:10:00Z",
+    retryAt: null,
+  };
+
+  render(<App />);
+
+  expect(await screen.findByText("需要重新授权")).toBeVisible();
+  expect(screen.getByText(/在账户管理中重新授权此账户/)).toBeVisible();
+});
+
+test("shows manual refresh cooldown as disabled feedback", async () => {
+  quotaResponse = {
+    status: "cooldown",
+    snapshot: null,
+    retryAt: "2099-07-26T12:00:30Z",
+  };
+
+  render(<App />);
+
+  expect(await screen.findByText("刷新冷却中")).toBeVisible();
+  expect(screen.getByRole("button", { name: /后可刷新/ })).toBeDisabled();
+});

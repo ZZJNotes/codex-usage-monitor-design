@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::quota::{QuotaAccount, QuotaSnapshot, QuotaSource, QuotaWindow};
+use crate::quota::{
+    QuotaAccount, QuotaFailureKind, QuotaRefreshError, QuotaSnapshot, QuotaSource, QuotaWindow,
+};
 
 pub struct CodexAppServerSource {
     executable: PathBuf,
@@ -123,9 +125,10 @@ impl CodexAppServerSource {
 }
 
 impl QuotaSource for CodexAppServerSource {
-    fn refresh(&self) -> Result<QuotaSnapshot, String> {
-        let response = self.request()?;
+    fn refresh(&self) -> Result<QuotaSnapshot, QuotaRefreshError> {
+        let response = self.request().map_err(classify_app_server_error)?;
         normalize_response(response, Utc::now())
+            .map_err(|message| QuotaRefreshError::new(QuotaFailureKind::InvalidResponse, message))
     }
 }
 
@@ -252,12 +255,39 @@ fn normalize_response(
     }
     Ok(QuotaSnapshot {
         account: QuotaAccount {
+            id: display_name.clone(),
             display_name,
             plan_type,
         },
         windows,
         updated_at: observed_at,
     })
+}
+
+fn classify_app_server_error(message: String) -> QuotaRefreshError {
+    let lowercase = message.to_ascii_lowercase();
+    let kind = if lowercase.contains("did not match its schema")
+        || lowercase.contains("did not contain a result")
+    {
+        QuotaFailureKind::InvalidResponse
+    } else if lowercase.contains("auth")
+        || lowercase.contains("login")
+        || lowercase.contains("unauthorized")
+        || lowercase.contains("forbidden")
+        || lowercase.contains("401")
+        || lowercase.contains("403")
+    {
+        QuotaFailureKind::Authentication
+    } else if lowercase.contains("timed out")
+        || lowercase.contains("could not start")
+        || lowercase.contains("connect")
+        || lowercase.contains("offline")
+    {
+        QuotaFailureKind::Transport
+    } else {
+        QuotaFailureKind::Service
+    };
+    QuotaRefreshError::new(kind, message)
 }
 
 #[cfg(test)]

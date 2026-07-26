@@ -52,16 +52,30 @@ export type QuotaWindow = {
 };
 
 export type QuotaSnapshot = {
-  account: { displayName: string; planType: string };
+  account: { id: string; displayName: string; planType: string };
   windows: QuotaWindow[];
   updatedAt: string;
 };
 
 export type QuotaState =
   | { status: "loading" }
-  | { status: "ready"; snapshot: QuotaSnapshot }
+  | { status: "ready"; snapshot: QuotaSnapshot; nextRefreshAt: string }
+  | {
+      status: "stale";
+      reason: "transport" | "service" | "invalidResponse";
+      snapshot: QuotaSnapshot;
+      failedAt: string;
+      retryAt: string;
+    }
   | {
       status: "error";
-      reason: "paused" | "storage" | "unavailable";
+      reason: "paused" | "storage" | "reauthorization" | "transport" | "service" | "invalidResponse" | "unavailable";
       lastSnapshot: QuotaSnapshot | null;
+      failedAt: string;
+      retryAt: string | null;
+    }
+  | {
+      status: "cooldown";
+      snapshot: QuotaSnapshot | null;
+      retryAt: string;
     };

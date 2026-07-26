@@ -201,6 +201,7 @@ mod tests {
         let database = Database::in_memory().unwrap();
         let snapshot = QuotaSnapshot {
             account: crate::quota::QuotaAccount {
+                id: "account-1".to_string(),
                 display_name: "user@example.com".to_string(),
                 plan_type: "plus".to_string(),
             },

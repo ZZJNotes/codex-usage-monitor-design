@@ -14,15 +14,16 @@ use std::{
     time::Duration,
 };
 
+use chrono::Utc;
 use commands::{
     get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, refresh_quota, refresh_system_health, set_locale,
+    get_system_health_history, recover_quota, refresh_quota, refresh_system_health, set_locale,
     set_monitoring_paused, set_theme, show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
 use platform_metrics::MacMetricSource;
-use quota::QuotaService;
+use quota::{CURRENT_CODEX_ACCOUNT_ID, QuotaRefreshCoordinator, QuotaService};
 use quota_app_server::CodexAppServerSource;
 use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
@@ -66,6 +67,7 @@ pub fn run() {
             refresh_system_health,
             get_quota_state,
             refresh_quota,
+            recover_quota,
             get_application_status,
             get_lifecycle_preferences,
             set_monitoring_paused,
@@ -91,12 +93,16 @@ pub fn run() {
             );
             let health = Arc::new(SystemHealthService::new(Arc::new(MacMetricSource::new())));
             let quota = Arc::new(match CodexAppServerSource::discover() {
-                Ok(source) => {
-                    QuotaService::with_store(Arc::new(source), Arc::new(database.clone()))
-                }
-                Err(message) => {
-                    QuotaService::unavailable_with_store(message, Arc::new(database.clone()))
-                }
+                Ok(source) => QuotaService::with_store(
+                    CURRENT_CODEX_ACCOUNT_ID,
+                    Arc::new(source),
+                    Arc::new(database.clone()),
+                ),
+                Err(message) => QuotaService::unavailable_with_store(
+                    CURRENT_CODEX_ACCOUNT_ID,
+                    message,
+                    Arc::new(database.clone()),
+                ),
             });
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
             app.manage(AppState {
@@ -145,12 +151,20 @@ pub fn run() {
                 }
             });
             let quota_lifecycle = app.state::<AppState>().lifecycle.clone();
+            let quota_refresh = QuotaRefreshCoordinator::new(vec![quota]);
             thread::spawn(move || {
+                let mut previous_tick = Utc::now();
                 loop {
                     if !quota_lifecycle.preferences().monitoring_paused {
-                        quota.refresh();
+                        let now = Utc::now();
+                        if (now - previous_tick).num_seconds() > 15 {
+                            quota_refresh.recover_due();
+                        } else {
+                            quota_refresh.refresh_due();
+                        }
+                        previous_tick = now;
                     }
-                    thread::sleep(Duration::from_secs(600));
+                    thread::sleep(Duration::from_secs(5));
                 }
             });
             Ok(())
