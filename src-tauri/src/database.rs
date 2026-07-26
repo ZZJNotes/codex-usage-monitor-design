@@ -159,25 +159,6 @@ impl PreferenceStore for Database {
 }
 
 impl QuotaStore for Database {
-    fn load_latest(&self) -> Result<Option<QuotaSnapshot>, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "database lock poisoned".to_string())?;
-        let result = connection.query_row(
-            "SELECT snapshot_json FROM quota_snapshots ORDER BY observed_at_utc DESC LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        );
-        match result {
-            Ok(value) => serde_json::from_str(&value)
-                .map(Some)
-                .map_err(|error| error.to_string()),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(error) => Err(error.to_string()),
-        }
-    }
-
     fn save(&self, snapshot: &QuotaSnapshot) -> Result<(), String> {
         let value = serde_json::to_string(snapshot).map_err(|error| error.to_string())?;
         self.connection
@@ -234,6 +215,19 @@ mod tests {
 
         QuotaStore::save(&database, &snapshot).unwrap();
 
-        assert_eq!(QuotaStore::load_latest(&database).unwrap(), Some(snapshot));
+        let stored = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT snapshot_json FROM quota_snapshots ORDER BY observed_at_utc DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuotaSnapshot>(&stored).unwrap(),
+            snapshot
+        );
     }
 }

@@ -53,7 +53,6 @@ pub trait QuotaSource: Send + Sync {
 }
 
 pub trait QuotaStore: Send + Sync {
-    fn load_latest(&self) -> Result<Option<QuotaSnapshot>, String>;
     fn save(&self, snapshot: &QuotaSnapshot) -> Result<(), String>;
 }
 
@@ -74,16 +73,13 @@ impl QuotaService {
         }
     }
 
-    pub fn with_store(
-        source: Arc<dyn QuotaSource>,
-        store: Arc<dyn QuotaStore>,
-    ) -> Result<Self, String> {
-        Ok(Self {
+    pub fn with_store(source: Arc<dyn QuotaSource>, store: Arc<dyn QuotaStore>) -> Self {
+        Self {
             source,
             store: Some(store),
             state: RwLock::new(QuotaState::Loading),
             refresh_lock: Mutex::new(()),
-        })
+        }
     }
 
     pub fn unavailable(message: String) -> Self {
@@ -95,11 +91,8 @@ impl QuotaService {
         service
     }
 
-    pub fn unavailable_with_store(
-        message: String,
-        store: Arc<dyn QuotaStore>,
-    ) -> Result<Self, String> {
-        Ok(Self {
+    pub fn unavailable_with_store(message: String, store: Arc<dyn QuotaStore>) -> Self {
+        Self {
             source: Arc::new(UnavailableQuotaSource(message)),
             store: Some(store),
             state: RwLock::new(QuotaState::Error {
@@ -107,7 +100,7 @@ impl QuotaService {
                 last_snapshot: None,
             }),
             refresh_lock: Mutex::new(()),
-        })
+        }
     }
 
     pub fn latest(&self) -> QuotaState {
@@ -272,8 +265,7 @@ mod tests {
         let service = QuotaService::with_store(
             Arc::new(StaticQuotaSource(snapshot.clone())),
             database.clone(),
-        )
-        .unwrap();
+        );
         assert_eq!(
             service.refresh(),
             QuotaState::Ready {
@@ -281,11 +273,8 @@ mod tests {
             }
         );
 
-        let unavailable = QuotaService::unavailable_with_store(
-            "Codex CLI is unavailable".to_string(),
-            database.clone(),
-        )
-        .unwrap();
+        let unavailable =
+            QuotaService::unavailable_with_store("Codex CLI is unavailable".to_string(), database);
 
         assert_eq!(
             unavailable.latest(),
@@ -294,7 +283,6 @@ mod tests {
                 last_snapshot: None,
             }
         );
-        assert_eq!(database.load_latest().unwrap(), Some(snapshot));
     }
 
     #[test]

@@ -93,11 +93,9 @@ pub fn run() {
             let quota = Arc::new(match CodexAppServerSource::discover() {
                 Ok(source) => {
                     QuotaService::with_store(Arc::new(source), Arc::new(database.clone()))
-                        .map_err(std::io::Error::other)?
                 }
                 Err(message) => {
                     QuotaService::unavailable_with_store(message, Arc::new(database.clone()))
-                        .map_err(std::io::Error::other)?
                 }
             });
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
