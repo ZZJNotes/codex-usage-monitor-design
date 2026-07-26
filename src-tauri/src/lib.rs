@@ -19,6 +19,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use commands::NotificationIpcState;
 use commands::{
     get_application_status, get_lifecycle_preferences, get_notification_status, get_quota_state,
     get_system_health, get_system_health_history, get_token_usage, reassign_token_session,
@@ -225,6 +226,10 @@ pub fn run() {
                 token_usage: token_usage.clone(),
                 notifications: notifications.clone(),
                 application_status: application_status.clone(),
+            });
+            app.manage(NotificationIpcState {
+                lifecycle: lifecycle.clone(),
+                notifications: notifications.clone(),
             });
             let preferences = lifecycle.preferences();
             app.manage(setup_tray(app.handle(), &preferences)?);

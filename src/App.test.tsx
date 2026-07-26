@@ -207,6 +207,30 @@ test("shows notification thresholds and textual active status with cause impact 
   }));
 });
 
+test("keeps the actionable condition visible when macOS notification delivery fails", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "get_lifecycle_preferences") return Promise.resolve(preferencesResponse);
+    if (command === "show_dashboard") return Promise.resolve();
+    if (command === "get_application_status") return Promise.resolve({ storageIssue: null });
+    if (command === "get_notification_status") return Promise.resolve({
+      activeConditions: [{ key: "memoryPressure", kind: "memoryPressure", label: "Memory pressure is critical", accountId: null }],
+      lastNotification: null,
+      deliveryError: "notifications denied",
+    });
+    if (command === "get_system_health_history") return Promise.resolve([]);
+    if (command === "get_quota_state") return Promise.resolve(quotaResponse);
+    if (command === "get_token_usage") return Promise.resolve({ status: "loading" });
+    if (command === "get_system_health") return Promise.resolve({ status: "loading" });
+    return Promise.reject(new Error(`unexpected command ${command}`));
+  });
+
+  render(<App />);
+
+  expect(await screen.findByText("系统通知投递失败")).toBeVisible();
+  expect(screen.getByText("内存压力严重")).toBeVisible();
+  expect(screen.queryByText("当前没有需处理的通知条件")).not.toBeInTheDocument();
+});
+
 test("keeps a disappeared quota window configurable so it can be removed", async () => {
   preferencesResponse = {
     ...preferencesResponse,

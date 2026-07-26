@@ -1,16 +1,23 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use tauri::{AppHandle, State};
 
 use crate::{
     AppState, ApplicationStatus,
     lifecycle::{LifecyclePreferences, MenuBarPreferences},
-    notification::{NotificationPolicy, NotificationStatus},
+    notification::{NotificationPolicy, NotificationService, NotificationStatus},
     quota::{QuotaService, QuotaState},
     set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     token_usage::{TokenUsageFilters, TokenUsageState},
     tray::{TrayMenuItems, update_tray},
 };
+
+pub(crate) struct NotificationIpcState {
+    pub(crate) lifecycle: Arc<crate::lifecycle::LifecycleService>,
+    pub(crate) notifications: Arc<NotificationService>,
+}
 
 #[tauri::command]
 pub(crate) fn get_system_health(state: State<'_, AppState>) -> SystemHealthState {
@@ -160,7 +167,9 @@ pub(crate) fn get_lifecycle_preferences(state: State<'_, AppState>) -> Lifecycle
 }
 
 #[tauri::command]
-pub(crate) fn get_notification_status(state: State<'_, AppState>) -> NotificationStatus {
+pub(crate) fn get_notification_status(
+    state: State<'_, NotificationIpcState>,
+) -> NotificationStatus {
     state.notifications.status()
 }
 
@@ -212,16 +221,9 @@ pub(crate) fn set_menu_bar_preferences(
 #[tauri::command]
 pub(crate) fn set_notification_preferences(
     notifications: NotificationPolicy,
-    state: State<'_, AppState>,
+    state: State<'_, NotificationIpcState>,
 ) -> Result<LifecyclePreferences, String> {
-    set_notification_preferences_service(&state.lifecycle, notifications)
-}
-
-fn set_notification_preferences_service(
-    lifecycle: &crate::lifecycle::LifecycleService,
-    notifications: NotificationPolicy,
-) -> Result<LifecyclePreferences, String> {
-    lifecycle.set_notifications(notifications)
+    state.lifecycle.set_notifications(notifications)
 }
 
 #[tauri::command]
@@ -232,7 +234,7 @@ pub(crate) fn show_dashboard(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -243,16 +245,13 @@ mod tests {
         QuotaAccount, QuotaFailureKind, QuotaRefreshError, QuotaSnapshot, QuotaSource,
     };
 
-    #[derive(Default)]
-    struct MemoryPreferenceStore(Mutex<Option<LifecyclePreferences>>);
+    struct NoopNotificationSender;
 
-    impl crate::lifecycle::PreferenceStore for MemoryPreferenceStore {
-        fn load(&self) -> Result<Option<LifecyclePreferences>, String> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-
-        fn save(&self, preferences: &LifecyclePreferences) -> Result<(), String> {
-            *self.0.lock().unwrap() = Some(preferences.clone());
+    impl crate::notification::NotificationSender for NoopNotificationSender {
+        fn send(
+            &self,
+            _notification: &crate::notification::SystemNotification,
+        ) -> Result<(), String> {
             Ok(())
         }
     }
@@ -342,32 +341,74 @@ mod tests {
     }
 
     #[test]
-    fn notification_ipc_contract_persists_validated_settings_and_typed_status() {
+    fn notification_commands_round_trip_through_the_tauri_ipc_boundary() {
+        let database = crate::database::Database::in_memory().unwrap();
         let lifecycle =
-            crate::lifecycle::LifecycleService::new(Arc::new(MemoryPreferenceStore::default()))
-                .unwrap();
-        let policy = NotificationPolicy {
-            quota_thresholds: vec![25, 5, 0],
-            ..NotificationPolicy::default()
-        };
-
-        let preferences = set_notification_preferences_service(&lifecycle, policy.clone()).unwrap();
-        let status = crate::notification::NotificationStatus {
-            active_conditions: vec![crate::notification::ActiveNotificationCondition {
-                key: "disk".into(),
-                kind: crate::notification::NotificationConditionKind::Disk,
-                label: "Disk available space ≤ 10%".into(),
-                account_id: None,
-            }],
-            ..crate::notification::NotificationStatus::default()
-        };
-        let dto = serde_json::to_value(status).unwrap();
-
-        assert_eq!(preferences.notifications, policy);
-        assert_eq!(dto["activeConditions"][0]["kind"], "disk");
-        assert_eq!(
-            dto["activeConditions"][0]["accountId"],
-            serde_json::Value::Null
+            Arc::new(crate::lifecycle::LifecycleService::new(Arc::new(database.clone())).unwrap());
+        let notifications = Arc::new(
+            crate::notification::NotificationService::new(
+                Arc::new(database),
+                Arc::new(NoopNotificationSender),
+            )
+            .unwrap(),
         );
+        let app = tauri::test::mock_builder()
+            .manage(NotificationIpcState {
+                lifecycle,
+                notifications,
+            })
+            .invoke_handler(tauri::generate_handler![
+                get_notification_status,
+                set_notification_preferences
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "set_notification_preferences".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                    "notifications": {
+                        "enabled": true,
+                        "quotaThresholds": [25, 5, 0],
+                        "diskAvailablePercentThreshold": 12,
+                        "consecutiveRefreshFailures": 4
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .unwrap()
+        .deserialize::<serde_json::Value>()
+        .unwrap();
+        assert_eq!(
+            response["notifications"]["quotaThresholds"],
+            serde_json::json!([25, 5, 0])
+        );
+
+        let status = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "get_notification_status".into(),
+                callback: tauri::ipc::CallbackFn(2),
+                error: tauri::ipc::CallbackFn(3),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .unwrap()
+        .deserialize::<serde_json::Value>()
+        .unwrap();
+        assert_eq!(status["activeConditions"], serde_json::json!([]));
+        assert_eq!(status["deliveryError"], serde_json::Value::Null);
     }
 }

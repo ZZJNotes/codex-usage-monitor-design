@@ -27,4 +27,5 @@ tauri-plugin-notification = "2.3.3"
 thiserror = "2.0.17"
 
 [dev-dependencies]
+tauri = { version = "2.11.5", features = ["test"] }
 tempfile = "3.23.0"

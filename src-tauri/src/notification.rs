@@ -141,6 +141,7 @@ pub struct PersistedNotificationState {
     accounts: BTreeMap<AccountId, AccountNotificationState>,
     disk_active: bool,
     memory_active: bool,
+    retry_conditions: BTreeSet<NotificationConditionId>,
     status: NotificationStatus,
 }
 
@@ -157,6 +158,7 @@ struct PendingNotification {
     activation: NotificationActivation,
 }
 
+#[derive(Clone)]
 enum NotificationActivation {
     Quota {
         account_id: AccountId,
@@ -169,7 +171,79 @@ enum NotificationActivation {
     MemoryPressure,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+enum NotificationConditionId {
+    Quota(AccountId, String),
+    Authentication(AccountId),
+    RefreshExpired(AccountId),
+    Disk,
+    MemoryPressure,
+}
+
 impl NotificationActivation {
+    fn id(&self) -> NotificationConditionId {
+        match self {
+            Self::Quota {
+                account_id,
+                window_name,
+                ..
+            } => NotificationConditionId::Quota(account_id.clone(), window_name.clone()),
+            Self::Authentication(account_id) => {
+                NotificationConditionId::Authentication(account_id.clone())
+            }
+            Self::RefreshExpired(account_id) => {
+                NotificationConditionId::RefreshExpired(account_id.clone())
+            }
+            Self::Disk => NotificationConditionId::Disk,
+            Self::MemoryPressure => NotificationConditionId::MemoryPressure,
+        }
+    }
+
+    fn condition(&self, policy: &NotificationPolicy) -> ActiveNotificationCondition {
+        match self {
+            Self::Quota {
+                account_id,
+                window_name,
+                level,
+            } => ActiveNotificationCondition {
+                key: format!("quota:{}:{window_name}", account_id.as_str()),
+                kind: NotificationConditionKind::Quota,
+                label: format!("{window_name} ≤ {level}%"),
+                account_id: Some(account_id.clone()),
+            },
+            Self::Authentication(account_id) => ActiveNotificationCondition {
+                key: format!("authentication:{}", account_id.as_str()),
+                kind: NotificationConditionKind::Authentication,
+                label: "OAuth reauthorization required".into(),
+                account_id: Some(account_id.clone()),
+            },
+            Self::RefreshExpired(account_id) => ActiveNotificationCondition {
+                key: format!("refresh:{}", account_id.as_str()),
+                kind: NotificationConditionKind::RefreshExpired,
+                label: format!(
+                    "Quota refresh failed {} consecutive times",
+                    policy.consecutive_refresh_failures
+                ),
+                account_id: Some(account_id.clone()),
+            },
+            Self::Disk => ActiveNotificationCondition {
+                key: "disk".into(),
+                kind: NotificationConditionKind::Disk,
+                label: format!(
+                    "Disk available space ≤ {}%",
+                    policy.disk_available_percent_threshold
+                ),
+                account_id: None,
+            },
+            Self::MemoryPressure => ActiveNotificationCondition {
+                key: "memoryPressure".into(),
+                kind: NotificationConditionKind::MemoryPressure,
+                label: "Memory pressure is critical".into(),
+                account_id: None,
+            },
+        }
+    }
+
     fn apply(self, state: &mut PersistedNotificationState) {
         match self {
             Self::Quota {
@@ -272,16 +346,35 @@ impl NotificationService {
         let mut state = self.state.lock().expect("notification state poisoned");
         let original = state.clone();
         let mut pending = Vec::new();
-        let account = state.accounts.entry(account_id.clone()).or_default();
-
+        let authentication_retry = state
+            .retry_conditions
+            .contains(&NotificationConditionId::Authentication(account_id.clone()));
+        let refresh_retry = state
+            .retry_conditions
+            .contains(&NotificationConditionId::RefreshExpired(account_id.clone()));
         match quota_state {
             QuotaState::Ready { snapshot, .. } => {
-                account.authentication_active = false;
-                account.refresh_expired_active = false;
-                account.consecutive_refresh_failures = 0;
-                account.last_refresh_failure_at = None;
+                {
+                    let account = state.accounts.entry(account_id.clone()).or_default();
+                    account.authentication_active = false;
+                    account.refresh_expired_active = false;
+                    account.consecutive_refresh_failures = 0;
+                    account.last_refresh_failure_at = None;
+                }
+                state
+                    .retry_conditions
+                    .remove(&NotificationConditionId::Authentication(account_id.clone()));
+                state
+                    .retry_conditions
+                    .remove(&NotificationConditionId::RefreshExpired(account_id.clone()));
+                let PersistedNotificationState {
+                    quota_levels,
+                    retry_conditions,
+                    ..
+                } = &mut *state;
                 evaluate_quota_windows(
-                    &mut state.quota_levels,
+                    quota_levels,
+                    retry_conditions,
                     account_id,
                     display_name,
                     snapshot,
@@ -296,17 +389,27 @@ impl NotificationService {
                 failed_at,
                 ..
             } => {
-                count_refresh_failure(account, *reason, *failed_at);
-                queue_refresh_expired_if_needed(
-                    account,
-                    account_id,
-                    display_name,
-                    policy,
-                    locale,
-                    &mut pending,
-                );
+                {
+                    let account = state.accounts.entry(account_id.clone()).or_default();
+                    count_refresh_failure(account, *reason, *failed_at);
+                    queue_refresh_expired_if_needed(
+                        account,
+                        account_id,
+                        display_name,
+                        policy,
+                        locale,
+                        refresh_retry,
+                        &mut pending,
+                    );
+                }
+                let PersistedNotificationState {
+                    quota_levels,
+                    retry_conditions,
+                    ..
+                } = &mut *state;
                 evaluate_quota_windows(
-                    &mut state.quota_levels,
+                    quota_levels,
+                    retry_conditions,
                     account_id,
                     display_name,
                     snapshot,
@@ -322,16 +425,24 @@ impl NotificationService {
                 ..
             } => {
                 if *reason == QuotaErrorReason::Reauthorization {
-                    account.consecutive_refresh_failures = 0;
-                    account.last_refresh_failure_at = None;
-                    account.refresh_expired_active = false;
-                    if !account.authentication_active {
+                    let should_notify = {
+                        let account = state.accounts.entry(account_id.clone()).or_default();
+                        account.consecutive_refresh_failures = 0;
+                        account.last_refresh_failure_at = None;
+                        account.refresh_expired_active = false;
+                        !account.authentication_active || authentication_retry
+                    };
+                    state
+                        .retry_conditions
+                        .remove(&NotificationConditionId::RefreshExpired(account_id.clone()));
+                    if should_notify {
                         pending.push(PendingNotification {
                             notification: authentication_notification(display_name, locale),
                             activation: NotificationActivation::Authentication(account_id.clone()),
                         });
                     }
                 } else {
+                    let account = state.accounts.entry(account_id.clone()).or_default();
                     count_refresh_failure(account, *reason, *failed_at);
                     queue_refresh_expired_if_needed(
                         account,
@@ -339,12 +450,19 @@ impl NotificationService {
                         display_name,
                         policy,
                         locale,
+                        refresh_retry,
                         &mut pending,
                     );
                 }
                 if let Some(snapshot) = last_snapshot {
+                    let PersistedNotificationState {
+                        quota_levels,
+                        retry_conditions,
+                        ..
+                    } = &mut *state;
                     evaluate_quota_windows(
-                        &mut state.quota_levels,
+                        quota_levels,
+                        retry_conditions,
                         account_id,
                         display_name,
                         snapshot,
@@ -385,7 +503,12 @@ impl NotificationService {
         };
         let disk_exhausted = disk_available_percent
             .is_some_and(|percent| percent <= policy.disk_available_percent_threshold);
-        if disk_exhausted && !state.disk_active {
+        if disk_exhausted
+            && (!state.disk_active
+                || state
+                    .retry_conditions
+                    .contains(&NotificationConditionId::Disk))
+        {
             pending.push(PendingNotification {
                 notification: disk_notification(
                     disk_available_percent.unwrap_or_default(),
@@ -396,15 +519,26 @@ impl NotificationService {
             });
         } else if !disk_exhausted {
             state.disk_active = false;
+            state
+                .retry_conditions
+                .remove(&NotificationConditionId::Disk);
         }
         let memory_critical = metrics.memory_pressure == "critical";
-        if memory_critical && !state.memory_active {
+        if memory_critical
+            && (!state.memory_active
+                || state
+                    .retry_conditions
+                    .contains(&NotificationConditionId::MemoryPressure))
+        {
             pending.push(PendingNotification {
                 notification: memory_notification(locale),
                 activation: NotificationActivation::MemoryPressure,
             });
         } else if !memory_critical {
             state.memory_active = false;
+            state
+                .retry_conditions
+                .remove(&NotificationConditionId::MemoryPressure);
         }
         self.deliver_and_save(&mut state, pending, policy, &original)
     }
@@ -417,22 +551,35 @@ impl NotificationService {
         original: &PersistedNotificationState,
     ) -> Result<(), String> {
         let attempted_delivery = !pending.is_empty();
+        let previous_delivery_error = state.status.delivery_error.clone();
         let mut delivery_error = None;
         for pending_notification in pending {
+            let condition_id = pending_notification.activation.id();
             match self.sender.send(&pending_notification.notification) {
                 Ok(()) => {
                     pending_notification.activation.apply(state);
+                    state.retry_conditions.remove(&condition_id);
                     state.status.last_notification = Some(NotificationRecord {
                         sent_at: self.clock.now(),
                         title: pending_notification.notification.title,
                         body: pending_notification.notification.body,
                     });
                 }
-                Err(error) => delivery_error = Some(error),
+                Err(error) => {
+                    delivery_error = Some(error);
+                    pending_notification.activation.apply(state);
+                    state.retry_conditions.insert(condition_id);
+                }
             }
         }
         if attempted_delivery {
-            state.status.delivery_error = delivery_error;
+            state.status.delivery_error = if state.retry_conditions.is_empty() {
+                None
+            } else {
+                delivery_error.or(previous_delivery_error)
+            };
+        } else if state.retry_conditions.is_empty() {
+            state.status.delivery_error = None;
         }
         rebuild_active_conditions(state, policy);
         self.save_if_changed(state, original)
@@ -452,6 +599,12 @@ impl NotificationService {
         state
             .accounts
             .retain(|account_id, _| observed.contains(account_id));
+        state.retry_conditions.retain(|condition| match condition {
+            NotificationConditionId::Quota(account_id, _)
+            | NotificationConditionId::Authentication(account_id)
+            | NotificationConditionId::RefreshExpired(account_id) => observed.contains(account_id),
+            NotificationConditionId::Disk | NotificationConditionId::MemoryPressure => true,
+        });
         rebuild_active_conditions(&mut state, policy);
         self.save_if_changed(&state, &original)
     }
@@ -463,6 +616,7 @@ impl NotificationService {
         state.accounts.clear();
         state.disk_active = false;
         state.memory_active = false;
+        state.retry_conditions.clear();
         state.status.active_conditions.clear();
         self.save_if_changed(&state, &original)
     }
@@ -504,10 +658,11 @@ fn queue_refresh_expired_if_needed(
     display_name: &str,
     policy: &NotificationPolicy,
     locale: NotificationLocale,
+    retry_pending: bool,
     pending: &mut Vec<PendingNotification>,
 ) {
     if account.consecutive_refresh_failures >= policy.consecutive_refresh_failures
-        && !account.refresh_expired_active
+        && (!account.refresh_expired_active || retry_pending)
     {
         pending.push(PendingNotification {
             notification: refresh_expired_notification(
@@ -523,6 +678,7 @@ fn queue_refresh_expired_if_needed(
 #[allow(clippy::too_many_arguments)]
 fn evaluate_quota_windows(
     active_levels: &mut BTreeMap<AccountId, BTreeMap<String, u8>>,
+    retry_conditions: &mut BTreeSet<NotificationConditionId>,
     account_id: &AccountId,
     display_name: &str,
     snapshot: &QuotaSnapshot,
@@ -535,6 +691,12 @@ fn evaluate_quota_windows(
         .iter()
         .map(|window| window.name.clone())
         .collect::<BTreeSet<_>>();
+    retry_conditions.retain(|condition| match condition {
+        NotificationConditionId::Quota(retry_account, window) if retry_account == account_id => {
+            observed_windows.contains(window)
+        }
+        _ => true,
+    });
     let account_levels = active_levels.entry(account_id.clone()).or_default();
     account_levels.retain(|window, _| observed_windows.contains(window));
     let recovery_threshold = policy
@@ -546,6 +708,10 @@ fn evaluate_quota_windows(
     for window in &snapshot.windows {
         if window.remaining_percent > recovery_threshold {
             account_levels.remove(&window.name);
+            retry_conditions.remove(&NotificationConditionId::Quota(
+                account_id.clone(),
+                window.name.clone(),
+            ));
             continue;
         }
         let current_level = policy
@@ -559,7 +725,11 @@ fn evaluate_quota_windows(
         };
         let should_send = account_levels
             .get(&window.name)
-            .is_none_or(|previous| current_level < *previous);
+            .is_none_or(|previous| current_level < *previous)
+            || retry_conditions.contains(&NotificationConditionId::Quota(
+                account_id.clone(),
+                window.name.clone(),
+            ));
         if should_send {
             pending.push(PendingNotification {
                 notification: quota_notification(
@@ -585,53 +755,31 @@ fn rebuild_active_conditions(state: &mut PersistedNotificationState, policy: &No
     let mut conditions = Vec::new();
     for (account_id, windows) in &state.quota_levels {
         for (window, threshold) in windows {
-            conditions.push(ActiveNotificationCondition {
-                key: format!("quota:{}:{window}", account_id.as_str()),
-                kind: NotificationConditionKind::Quota,
-                label: format!("{window} ≤ {threshold}%"),
-                account_id: Some(account_id.clone()),
-            });
+            conditions.push(
+                NotificationActivation::Quota {
+                    account_id: account_id.clone(),
+                    window_name: window.clone(),
+                    level: *threshold,
+                }
+                .condition(policy),
+            );
         }
     }
     for (account_id, account) in &state.accounts {
         if account.authentication_active {
-            conditions.push(ActiveNotificationCondition {
-                key: format!("authentication:{}", account_id.as_str()),
-                kind: NotificationConditionKind::Authentication,
-                label: "OAuth reauthorization required".into(),
-                account_id: Some(AccountId::from(account_id.as_str())),
-            });
+            conditions
+                .push(NotificationActivation::Authentication(account_id.clone()).condition(policy));
         }
         if account.refresh_expired_active {
-            conditions.push(ActiveNotificationCondition {
-                key: format!("refresh:{}", account_id.as_str()),
-                kind: NotificationConditionKind::RefreshExpired,
-                label: format!(
-                    "Quota refresh failed {} consecutive times",
-                    policy.consecutive_refresh_failures
-                ),
-                account_id: Some(AccountId::from(account_id.as_str())),
-            });
+            conditions
+                .push(NotificationActivation::RefreshExpired(account_id.clone()).condition(policy));
         }
     }
     if state.disk_active {
-        conditions.push(ActiveNotificationCondition {
-            key: "disk".into(),
-            kind: NotificationConditionKind::Disk,
-            label: format!(
-                "Disk available space ≤ {}%",
-                policy.disk_available_percent_threshold
-            ),
-            account_id: None,
-        });
+        conditions.push(NotificationActivation::Disk.condition(policy));
     }
     if state.memory_active {
-        conditions.push(ActiveNotificationCondition {
-            key: "memoryPressure".into(),
-            kind: NotificationConditionKind::MemoryPressure,
-            label: "Memory pressure is critical".into(),
-            account_id: None,
-        });
+        conditions.push(NotificationActivation::MemoryPressure.condition(policy));
     }
     state.status.active_conditions = conditions;
 }
@@ -1108,7 +1256,7 @@ mod tests {
             service.status().delivery_error.as_deref(),
             Some("notifications denied")
         );
-        assert!(service.status().active_conditions.is_empty());
+        assert_eq!(service.status().active_conditions.len(), 1);
 
         service
             .evaluate_account(
@@ -1127,8 +1275,14 @@ mod tests {
 
     #[test]
     fn replacing_a_temporary_account_identity_clears_its_recovery_condition() {
+        let store = Arc::new(MemoryStore::default());
         let sender = Arc::new(FakeSender::default());
-        let service = service(sender);
+        let service = NotificationService::with_dependencies(
+            store.clone(),
+            sender.clone(),
+            Arc::new(FixedClock(time(0))),
+        )
+        .unwrap();
         let temporary = AccountId::from("current-read-only");
         let real = AccountId::from("account-a");
         let policy = NotificationPolicy::default();
@@ -1147,11 +1301,15 @@ mod tests {
                 NotificationLocale::English,
             )
             .unwrap();
+        drop(service);
+        let restarted =
+            NotificationService::with_dependencies(store, sender, Arc::new(FixedClock(time(1))))
+                .unwrap();
 
-        service
+        restarted
             .retain_accounts(std::slice::from_ref(&real), &policy)
             .unwrap();
-        service
+        restarted
             .evaluate_account(
                 &real,
                 "Account A",
@@ -1161,7 +1319,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(service.status().active_conditions.is_empty());
+        assert!(restarted.status().active_conditions.is_empty());
     }
 
     #[test]
