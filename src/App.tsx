@@ -22,6 +22,41 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+type HealthView = {
+  metrics: HealthMetrics | null;
+  updatedAt: string | null;
+  notice: "loading" | "empty" | "error" | "stale" | null;
+  errorDetail: string | null;
+};
+
+function toHealthView(health: HealthState, paused: boolean): HealthView {
+  switch (health.status) {
+    case "loading":
+      return {
+        metrics: null,
+        updatedAt: null,
+        notice: paused ? "empty" : "loading",
+        errorDetail: null,
+      };
+    case "ready":
+      return { metrics: health.metrics, updatedAt: health.updatedAt, notice: null, errorDetail: null };
+    case "stale":
+      return {
+        metrics: health.metrics,
+        updatedAt: health.updatedAt,
+        notice: paused ? null : "stale",
+        errorDetail: null,
+      };
+    case "error":
+      return {
+        metrics: health.lastMetrics,
+        updatedAt: health.updatedAt,
+        notice: "error",
+        errorDetail: health.message,
+      };
+  }
+}
+
 function formatBytes(value: number, locale: string, suffix = "") {
   if (!Number.isFinite(value) || value < 0) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -223,9 +258,10 @@ export function App() {
     return applyPreferenceMutation(monitorApi.setLocale(locale));
   }
 
-  const shownMetrics = health.status === "ready" || health.status === "stale" ? health.metrics : health.status === "error" ? health.lastMetrics : null;
+  const healthView = toHealthView(health, preferences.monitoringPaused);
+  const shownMetrics = healthView.metrics;
   const hasMetrics = shownMetrics && shownMetrics.memoryTotalBytes > 0 && shownMetrics.diskTotalBytes > 0;
-  const updatedAt = health.status === "ready" || health.status === "stale" || health.status === "error" ? health.updatedAt : null;
+  const updatedAt = healthView.updatedAt;
 
   return (
     <div className="app-shell">
@@ -261,10 +297,10 @@ export function App() {
 
         {requestError && <div className="error-banner" role="alert">{requestError}</div>}
         {applicationStatus.storageIssue && <div className="error-banner" role="alert"><div><strong>{t("storageError")}</strong><span>{applicationStatus.storageIssue.detail}. {t("storageRecovery")}</span></div></div>}
-        {health.status === "loading" && !preferences.monitoringPaused && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
-        {health.status === "loading" && preferences.monitoringPaused && <div className="state-panel" role="status">{t("empty")}</div>}
-        {health.status === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{health.message}</span></div><button type="button" onClick={() => void refresh(true)}>{t("retry")}</button></div>}
-        {health.status === "stale" && !preferences.monitoringPaused && <div className="error-banner" role="status">{t("stale")}</div>}
+        {healthView.notice === "loading" && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
+        {healthView.notice === "empty" && <div className="state-panel" role="status">{t("empty")}</div>}
+        {healthView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{healthView.errorDetail}</span></div><button type="button" onClick={() => void refresh(true)}>{t("retry")}</button></div>}
+        {healthView.notice === "stale" && <div className="error-banner" role="status">{t("stale")}</div>}
         {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
         {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
 

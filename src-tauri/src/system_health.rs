@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
@@ -95,6 +95,7 @@ pub trait MetricSource: Send + Sync {
 
 pub struct SystemHealthService {
     source: Arc<dyn MetricSource>,
+    sampling: Mutex<()>,
     state: RwLock<SystemHealthState>,
     previous: RwLock<Option<MetricSnapshot>>,
     history: RwLock<VecDeque<SystemHealthPoint>>,
@@ -104,6 +105,7 @@ impl SystemHealthService {
     pub fn new(source: Arc<dyn MetricSource>) -> Self {
         Self {
             source,
+            sampling: Mutex::new(()),
             state: RwLock::new(SystemHealthState::Loading),
             previous: RwLock::new(None),
             history: RwLock::new(VecDeque::with_capacity(1_800)),
@@ -115,6 +117,7 @@ impl SystemHealthService {
     }
 
     pub fn reset_rate_baseline(&self) {
+        let _sampling = self.sampling.lock().expect("sampling lock poisoned");
         *self.previous.write().expect("previous sample poisoned") = None;
     }
 
@@ -199,6 +202,7 @@ impl SystemHealthService {
     }
 
     pub fn sample(&self) -> Result<SystemHealthState, String> {
+        let _sampling = self.sampling.lock().expect("sampling lock poisoned");
         let snapshot = match self.source.collect() {
             Ok(snapshot) => snapshot,
             Err(message) => {
