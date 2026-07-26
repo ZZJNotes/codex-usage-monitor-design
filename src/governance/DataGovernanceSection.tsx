@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { monitorApi } from "../api";
+import { errorMessage } from "../errors";
 import { translator } from "../i18n";
 import type { CredentialDeletionStatus, TokenAccount } from "../types";
 
@@ -11,10 +12,6 @@ type Props = {
   onRetentionChange: (days: number) => Promise<void>;
   onHistoryChanged: () => Promise<void>;
 };
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
 
 export function DataGovernanceSection({
   locale,

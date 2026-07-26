@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { monitorApi } from "../api";
+import { errorMessage } from "../errors";
 import type { TokenUsageFilters, TokenUsageState } from "../types";
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
 
 export function useTokenUsage() {
   const [state, setState] = useState<TokenUsageState>({ status: "loading" });

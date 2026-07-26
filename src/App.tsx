@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { monitorApi } from "./api";
+import { errorMessage } from "./errors";
 import { translator } from "./i18n";
 import { DataGovernanceSection } from "./governance/DataGovernanceSection";
 import { TokenUsageSection } from "./token-usage/TokenUsageSection";
@@ -36,10 +37,6 @@ const defaultPreferences: LifecyclePreferences = {
     consecutiveRefreshFailures: 3,
   },
 };
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
 
 type HealthView = {
   metrics: HealthMetrics | null;

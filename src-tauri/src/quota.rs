@@ -79,6 +79,20 @@ pub enum QuotaState {
     },
 }
 
+impl QuotaState {
+    pub fn snapshot(&self) -> Option<&QuotaSnapshot> {
+        match self {
+            Self::Ready { snapshot, .. } | Self::Stale { snapshot, .. } => Some(snapshot),
+            Self::Error { last_snapshot, .. }
+            | Self::Cooldown {
+                snapshot: last_snapshot,
+                ..
+            } => last_snapshot.as_ref(),
+            Self::Loading => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum QuotaErrorReason {
@@ -345,7 +359,7 @@ impl QuotaService {
         let now = self.clock.now();
         QuotaState::Error {
             reason: QuotaErrorReason::Paused,
-            last_snapshot: snapshot_from_state(&self.latest()),
+            last_snapshot: self.latest().snapshot().cloned(),
             failed_at: now,
             retry_at: None,
         }
@@ -369,7 +383,7 @@ impl QuotaService {
                         && now < retry_at
                     {
                         return QuotaState::Cooldown {
-                            snapshot: snapshot_from_state(&self.latest()),
+                            snapshot: self.latest().snapshot().cloned(),
                             retry_at,
                         };
                     }
@@ -484,7 +498,7 @@ impl QuotaService {
             );
             Some(retry_at)
         };
-        let last_snapshot = snapshot_from_state(&self.latest());
+        let last_snapshot = self.latest().snapshot().cloned();
         let state = match (last_snapshot, retry_at) {
             (Some(snapshot), Some(retry_at)) => QuotaState::Stale {
                 reason,
@@ -529,22 +543,6 @@ impl QuotaRefreshCoordinator {
         for account in &self.accounts {
             account.stagger_recovery_if_due();
         }
-    }
-}
-
-fn snapshot_from_state(state: &QuotaState) -> Option<QuotaSnapshot> {
-    match state {
-        QuotaState::Ready { snapshot, .. }
-        | QuotaState::Stale { snapshot, .. }
-        | QuotaState::Cooldown {
-            snapshot: Some(snapshot),
-            ..
-        }
-        | QuotaState::Error {
-            last_snapshot: Some(snapshot),
-            ..
-        } => Some(snapshot.clone()),
-        _ => None,
     }
 }
 

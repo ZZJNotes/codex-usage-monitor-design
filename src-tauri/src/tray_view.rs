@@ -152,12 +152,7 @@ fn visible_snapshot<'a>(
     preferences: &LifecyclePreferences,
     quota: &'a QuotaState,
 ) -> Option<&'a QuotaSnapshot> {
-    let snapshot = match quota {
-        QuotaState::Ready { snapshot, .. } | QuotaState::Stale { snapshot, .. } => Some(snapshot),
-        QuotaState::Error { last_snapshot, .. } => last_snapshot.as_ref(),
-        QuotaState::Cooldown { snapshot, .. } => snapshot.as_ref(),
-        QuotaState::Loading => None,
-    }?;
+    let snapshot = quota.snapshot()?;
     preferences
         .menu_bar
         .pinned_account_id

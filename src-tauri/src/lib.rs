@@ -118,20 +118,7 @@ fn notification_account(
     state: &quota::QuotaState,
     fallback_account_id: &quota::AccountId,
 ) -> (quota::AccountId, String, bool) {
-    let snapshot = match state {
-        quota::QuotaState::Ready { snapshot, .. } | quota::QuotaState::Stale { snapshot, .. } => {
-            Some(snapshot)
-        }
-        quota::QuotaState::Error {
-            last_snapshot: Some(snapshot),
-            ..
-        }
-        | quota::QuotaState::Cooldown {
-            snapshot: Some(snapshot),
-            ..
-        } => Some(snapshot),
-        _ => None,
-    };
+    let snapshot = state.snapshot();
     snapshot
         .map(|snapshot| {
             (
