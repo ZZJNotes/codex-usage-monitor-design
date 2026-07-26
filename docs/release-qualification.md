@@ -36,14 +36,14 @@ fixture 中的 `PRIVATE_FIXTURE_SENTINEL`、`/REDACTED/never-store` 等内容是
 
 release binary 在临时 `CFFIXED_USER_HOME`/`HOME`、空 `CODEX_HOME` 下冷启动，并将 `CODEX_USAGE_MONITOR_CODEX_PATH` 指向 `/usr/bin/false`。因此本次运行未读取真实 `~/.codex`、`auth.json`、Keychain 或会话正文，也没有触发 Codex 网络访问。
 
-- 进程持续运行 21 秒，状态正常。
-- 隔离 SQLite 创建完成：746 ms。该值是 app setup/storage-ready 代理，不等同于可视 dashboard 首帧。
-- 10 秒 warm-up 后 5 次 idle CPU：0.4%、0.4%、0.2%、0.2%、0.2%，均低于 1% 目标。
-- 同期 RSS：123840、124272、124480、124640、124720 KiB；峰值约 121.8 MiB，低于 150 MiB 目标。
+- 最终签名产物进程持续运行 11 秒，状态正常。
+- 隔离 SQLite 创建完成：812 ms。该值是 app setup/storage-ready 代理，不等同于可视 dashboard 首帧。
+- storage-ready 后 5 次 CPU：0.3%、0.6%、0.3%、0.3%、0.2%，均低于 1% 目标。
+- 同期 RSS：122160、122736、122784、122784、122992 KiB；峰值约 120.1 MiB，低于 150 MiB 目标。
 - `lsof -a -p <pid> -i` 无输出；隔离进程没有打开 TCP/UDP socket。
 - 隔离数据目录只出现 SQLite、WAL 和 SHM；实际 DB byte scan 未命中 token、prompt、reply、command、attachment、work path 或 `/Users/` 标记。
 
-由于主窗口按产品设计初始隐藏、仓库没有不依赖 UI/Accessibility 授权的“dashboard painted” readiness 信号，本次不把 746 ms 伪报为 dashboard cold start。可视 dashboard 2 秒目标和菜单栏更新 1 秒目标保留给人工本机验收。
+由于主窗口按产品设计初始隐藏、仓库没有不依赖 UI/Accessibility 授权的“dashboard painted” readiness 信号，本次不把 812 ms 伪报为 dashboard cold start。可视 dashboard 2 秒目标和菜单栏更新 1 秒目标保留给人工本机验收。
 
 ## 查询性能
 
