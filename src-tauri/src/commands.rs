@@ -1,9 +1,9 @@
 use chrono::Utc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     AppState, ApplicationStatus,
-    governance::{CredentialDeletionStatus, ExportArtifact, ExportFormat, HistoryCleanupResult},
+    governance::{CredentialDeletionStatus, ExportFormat, ExportReceipt, HistoryCleanupResult},
     lifecycle::LifecyclePreferences,
     quota::{QuotaService, QuotaState},
     set_monitoring_paused_with_account_evidence, show_main_window,
@@ -219,8 +219,15 @@ pub(crate) fn delete_account_history(
 pub(crate) fn export_statistics(
     format: ExportFormat,
     state: State<'_, AppState>,
-) -> Result<ExportArtifact, String> {
-    state.governance.export(format, Utc::now())
+    app: AppHandle,
+) -> Result<ExportReceipt, String> {
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|_| "downloads directory is unavailable".to_string())?;
+    state
+        .governance
+        .export_to_directory(&downloads, "~/Downloads", format, Utc::now())
 }
 
 #[tauri::command]

@@ -51,14 +51,8 @@ export function DataGovernanceSection({
 
   async function download(format: "json" | "csv") {
     try {
-      const artifact = await monitorApi.exportStatistics(format);
-      const url = URL.createObjectURL(new Blob([artifact.content], { type: artifact.mimeType }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = artifact.filename;
-      link.click();
-      URL.revokeObjectURL(url);
-      setMessage(t("governanceDone"));
+      const receipt = await monitorApi.exportStatistics(format);
+      setMessage(t("exportDone", { destination: receipt.destination }));
       setError(null);
     } catch (reason) {
       setError(errorMessage(reason));

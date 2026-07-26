@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ApplicationStatus,
   CredentialDeletionStatus,
-  ExportArtifact,
+  ExportReceipt,
   HealthPoint,
   HealthState,
   HistoryCleanupResult,
@@ -45,7 +45,7 @@ export const monitorApi = {
   deleteAccountHistory: (accountKey: string) =>
     invoke<HistoryCleanupResult>("delete_account_history", { accountKey }),
   exportStatistics: (format: "json" | "csv") =>
-    invoke<ExportArtifact>("export_statistics", { format }),
+    invoke<ExportReceipt>("export_statistics", { format }),
   getCredentialDeletionStatus: () =>
     invoke<CredentialDeletionStatus>("get_credential_deletion_status"),
   requestCredentialDeletion: (accountKey: string) =>

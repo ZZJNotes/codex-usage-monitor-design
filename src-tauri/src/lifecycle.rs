@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -112,6 +112,7 @@ pub trait PreferenceStore: Send + Sync {
 pub struct LifecycleService {
     store: Arc<dyn PreferenceStore>,
     preferences: RwLock<LifecyclePreferences>,
+    mutation: Mutex<()>,
     sampling_was_paused: AtomicBool,
 }
 
@@ -122,6 +123,7 @@ impl LifecycleService {
         Ok(Self {
             store,
             preferences: RwLock::new(preferences),
+            mutation: Mutex::new(()),
             sampling_was_paused: AtomicBool::new(sampling_was_paused),
         })
     }
@@ -145,12 +147,12 @@ impl LifecycleService {
         &self,
         refresh_account_evidence: impl FnOnce(),
     ) -> Result<LifecyclePreferences, String> {
-        let mut current = self.preferences.write().expect("preferences poisoned");
-        let mut next = current.clone();
+        let _mutation = self.mutation.lock().expect("preference mutation poisoned");
+        let mut next = self.preferences();
         next.monitoring_paused = false;
         self.store.save(&next)?;
         refresh_account_evidence();
-        *current = next.clone();
+        *self.preferences.write().expect("preferences poisoned") = next.clone();
         Ok(next)
     }
 
@@ -173,6 +175,7 @@ impl LifecycleService {
         &self,
         change: impl FnOnce(&mut LifecyclePreferences),
     ) -> Result<LifecyclePreferences, String> {
+        let _mutation = self.mutation.lock().expect("preference mutation poisoned");
         let mut current = self.preferences.write().expect("preferences poisoned");
         let mut next = current.clone();
         change(&mut next);
@@ -302,5 +305,32 @@ mod tests {
 
         let restarted = LifecycleService::new(store).unwrap();
         assert_eq!(restarted.preferences().retention_days, 30);
+    }
+
+    #[test]
+    fn slow_resume_evidence_refresh_keeps_pause_state_readable_until_activation() {
+        let lifecycle =
+            Arc::new(LifecycleService::new(Arc::new(MemoryPreferenceStore::default())).unwrap());
+        lifecycle.set_monitoring_paused(true).unwrap();
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);
+        let worker = {
+            let lifecycle = lifecycle.clone();
+            std::thread::spawn(move || {
+                lifecycle
+                    .resume_after(|| {
+                        entered_sender.send(()).unwrap();
+                        release_receiver.recv().unwrap();
+                    })
+                    .unwrap()
+            })
+        };
+
+        entered_receiver.recv().unwrap();
+        assert!(lifecycle.preferences().monitoring_paused);
+        release_sender.send(()).unwrap();
+
+        assert!(!worker.join().unwrap().monitoring_paused);
+        assert!(!lifecycle.preferences().monitoring_paused);
     }
 }

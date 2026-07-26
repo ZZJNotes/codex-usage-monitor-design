@@ -123,6 +123,12 @@ beforeEach(() => {
     if (command === "cleanup_expired_history" || command === "clear_history") {
       return Promise.resolve({ quotaSnapshotsDeleted: 1, tokenEventsDeleted: 2, systemAggregatesDeleted: 3, sessionAttributionsDeleted: 1, accountMetadataDeleted: 1 });
     }
+    if (command === "export_statistics") {
+      return Promise.resolve({
+        filename: "codex-usage-2026-07-27.json",
+        destination: "~/Downloads/codex-usage-2026-07-27.json",
+      });
+    }
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
 });
@@ -280,6 +286,9 @@ test("offers local retention cleanup and safe export while explaining credential
     expect(invoke).toHaveBeenCalledWith("get_quota_state");
   });
   expect(await screen.findByText("本地数据操作已完成。")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "导出 JSON" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_statistics", { format: "json" }));
+  expect(await screen.findByText("导出成功：~/Downloads/codex-usage-2026-07-27.json")).toBeVisible();
 });
 
 test("explains that a persisted pause survives restart until the user resumes", async () => {
@@ -300,7 +309,17 @@ test("explains that a persisted pause survives restart until the user resumes", 
 });
 
 test("UI state fixtures contain no credentials, session content, or work paths", () => {
-  const fixture = JSON.stringify({ quotaResponse, preferenceResponse }).toLowerCase();
+  const fixture = JSON.stringify({
+    quotaResponse,
+    preferenceResponse,
+    tokenUsage: {
+      status: "ready",
+      data: { totals: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, sessions: [], models: [], accounts: [] },
+    },
+    systemHealth: { status: "ready", metrics: { cpuPercent: 10, memoryPressure: "normal" } },
+    applicationStatus: { storageIssue: null },
+    exportReceipt: { filename: "codex-usage.json", destination: "~/Downloads/codex-usage.json" },
+  }).toLowerCase();
   for (const prohibited of ["access_token", "refresh_token", "id_token", "bearer ", "sk-", "eyj", "prompt", "reply", "command", "attachment", "work_path", "/users/"]) {
     expect(fixture).not.toContain(prohibited);
   }

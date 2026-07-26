@@ -1,3 +1,5 @@
+use std::{fs::OpenOptions, io::Write, path::Path};
+
 use chrono::{DateTime, Utc};
 use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,13 @@ pub struct ExportArtifact {
     pub filename: String,
     pub mime_type: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportReceipt {
+    pub filename: String,
+    pub destination: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -219,6 +228,44 @@ impl DataGovernanceService {
                 content: safe_export_csv(&export),
             }),
         }
+    }
+
+    pub fn export_to_directory(
+        &self,
+        directory: &Path,
+        display_directory: &str,
+        format: ExportFormat,
+        generated_at: DateTime<Utc>,
+    ) -> Result<ExportReceipt, String> {
+        let artifact = self.export(format, generated_at)?;
+        let (stem, extension) = artifact
+            .filename
+            .rsplit_once('.')
+            .ok_or_else(|| "export filename is invalid".to_string())?;
+        for suffix in 0..1_000 {
+            let filename = if suffix == 0 {
+                artifact.filename.clone()
+            } else {
+                format!("{stem}-{suffix}.{extension}")
+            };
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(&filename))
+            {
+                Ok(mut file) => {
+                    file.write_all(artifact.content.as_bytes())
+                        .map_err(|_| "write export failed".to_string())?;
+                    return Ok(ExportReceipt {
+                        destination: format!("{display_directory}/{filename}"),
+                        filename,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("create export failed".to_string()),
+            }
+        }
+        Err("too many exports already exist for this date".to_string())
     }
 
     pub fn credential_deletion_status(&self) -> CredentialDeletionStatus {
@@ -657,6 +704,47 @@ mod tests {
             assert!(!json.content.to_ascii_lowercase().contains(prohibited));
             assert!(!csv.content.to_ascii_lowercase().contains(prohibited));
         }
+    }
+
+    #[test]
+    fn export_reports_only_after_a_real_unique_file_is_written() {
+        let governance = DataGovernanceService::new(Database::in_memory().unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let generated_at = Utc.with_ymd_and_hms(2026, 7, 27, 0, 0, 0).unwrap();
+
+        let first = governance
+            .export_to_directory(
+                directory.path(),
+                "~/Downloads",
+                ExportFormat::Json,
+                generated_at,
+            )
+            .unwrap();
+        let second = governance
+            .export_to_directory(
+                directory.path(),
+                "~/Downloads",
+                ExportFormat::Json,
+                generated_at,
+            )
+            .unwrap();
+
+        assert_eq!(first.destination, "~/Downloads/codex-usage-2026-07-27.json");
+        assert_eq!(
+            second.destination,
+            "~/Downloads/codex-usage-2026-07-27-1.json"
+        );
+        assert!(directory.path().join(first.filename).is_file());
+        assert!(directory.path().join(second.filename).is_file());
+        assert_eq!(
+            governance.export_to_directory(
+                &directory.path().join("missing"),
+                "~/Downloads",
+                ExportFormat::Csv,
+                generated_at,
+            ),
+            Err("create export failed".to_string())
+        );
     }
 
     #[test]

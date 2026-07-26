@@ -44,10 +44,9 @@ export type HistoryCleanupResult = {
   accountMetadataDeleted: number;
 };
 
-export type ExportArtifact = {
+export type ExportReceipt = {
   filename: string;
-  mimeType: string;
-  content: string;
+  destination: string;
 };
 
 export type CredentialDeletionStatus = {
