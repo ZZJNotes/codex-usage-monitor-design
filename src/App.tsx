@@ -262,6 +262,7 @@ export function App() {
   }
 
   useEffect(() => {
+    void monitorApi.showDashboard();
     void refreshPreferences();
     void refreshHistory();
     void refresh();

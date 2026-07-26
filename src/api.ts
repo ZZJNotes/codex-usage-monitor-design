@@ -8,6 +8,7 @@ import type {
 } from "./types";
 
 export const monitorApi = {
+  showDashboard: () => invoke<void>("show_dashboard"),
   getHealth: () => invoke<HealthState>("get_system_health"),
   refreshHealth: () => invoke<HealthState>("refresh_system_health"),
   getHealthHistory: () =>

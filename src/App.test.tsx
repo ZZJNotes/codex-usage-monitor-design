@@ -38,6 +38,9 @@ beforeEach(() => {
         launchAtLogin: false,
       });
     }
+    if (command === "show_dashboard") {
+      return Promise.resolve();
+    }
     if (command === "get_application_status") {
       return Promise.resolve({ storageIssue: null });
     }
