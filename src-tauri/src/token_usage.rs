@@ -108,7 +108,7 @@ pub enum TokenUsageState {
         last_data: Option<TokenUsageData>,
     },
     Stale {
-        data: TokenUsageData,
+        data: Option<TokenUsageData>,
         reason: TokenUsageStaleReason,
     },
 }
@@ -123,8 +123,16 @@ pub enum TokenUsageStaleReason {
 impl TokenUsageState {
     pub fn paused(self) -> Self {
         match self {
-            Self::Ready { data } | Self::Stale { data, .. } => Self::Stale {
+            Self::Ready { data } => Self::Stale {
+                data: Some(data),
+                reason: TokenUsageStaleReason::Paused,
+            },
+            Self::Stale { data, .. } => Self::Stale {
                 data,
+                reason: TokenUsageStaleReason::Paused,
+            },
+            Self::Loading => Self::Stale {
+                data: None,
                 reason: TokenUsageStaleReason::Paused,
             },
             other => other,
@@ -219,9 +227,9 @@ impl TokenUsageService {
                         message,
                         last_data: Some(data),
                     },
-                    None if (Utc::now() - scanned_at).num_seconds() > 10 => {
+                    None if (Utc::now() - scanned_at).num_seconds() > 45 => {
                         TokenUsageState::Stale {
-                            data,
+                            data: Some(data),
                             reason: TokenUsageStaleReason::Outdated,
                         }
                     }
@@ -473,7 +481,10 @@ mod tests {
             TokenUsageState::Ready { data } => data,
             TokenUsageState::Error { message, .. } => panic!("unexpected error: {message}"),
             TokenUsageState::Loading => panic!("unexpected loading state"),
-            TokenUsageState::Stale { data, .. } => data,
+            TokenUsageState::Stale {
+                data: Some(data), ..
+            } => data,
+            TokenUsageState::Stale { data: None, .. } => panic!("unexpected empty stale state"),
         }
     }
 
@@ -664,5 +675,22 @@ mod tests {
             20
         );
         assert_eq!(service.scan().unwrap().imported_events, 0);
+    }
+
+    #[test]
+    fn paused_service_reports_text_ready_state_without_reading_session_files() {
+        let directory = tempdir().unwrap();
+        let service = TokenUsageService::new(
+            Database::in_memory().unwrap(),
+            vec![directory.path().join("sessions")],
+        );
+
+        assert!(matches!(
+            service.query(TokenUsageFilters::default()).paused(),
+            TokenUsageState::Stale {
+                data: None,
+                reason: TokenUsageStaleReason::Paused,
+            }
+        ));
     }
 }

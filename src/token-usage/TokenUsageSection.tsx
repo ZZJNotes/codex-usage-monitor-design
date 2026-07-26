@@ -18,8 +18,9 @@ export function TokenUsageSection({ state, locale, formatLocale, onQuery }: {
   const [endAt, setEndAt] = useState("");
   const [model, setModel] = useState("");
   const [sessionId, setSessionId] = useState("");
-  const data = state.status === "ready" || state.status === "stale"
+  const data = state.status === "ready"
     ? state.data
+    : state.status === "stale" ? state.data
     : state.status === "error" ? state.lastData : null;
   const countItems: Array<[keyof TokenCounts, string]> = [
     ["inputTokens", t("tokenInput")], ["cachedInputTokens", t("tokenCached")],
@@ -47,7 +48,7 @@ export function TokenUsageSection({ state, locale, formatLocale, onQuery }: {
     <p className="token-semantics">{t("tokenSemantics")}</p>
     {state.status === "loading" && <div className="token-state" role="status">{t("tokenLoading")}</div>}
     {state.status === "ready" && <div className="token-state" role="status">{t("tokenFresh")} · <time dateTime={state.data.updatedAt}>{new Intl.DateTimeFormat(formatLocale, { dateStyle: "short", timeStyle: "medium" }).format(new Date(state.data.updatedAt))}</time></div>}
-    {state.status === "stale" && <div className="error-banner" role="status"><div><strong>{state.reason === "paused" ? t("tokenStalePaused") : t("tokenStaleOutdated")}</strong><time dateTime={state.data.updatedAt}>{new Intl.DateTimeFormat(formatLocale, { dateStyle: "short", timeStyle: "medium" }).format(new Date(state.data.updatedAt))}</time></div></div>}
+    {state.status === "stale" && <div className="error-banner" role="status"><div><strong>{state.reason === "paused" ? t("tokenStalePaused") : t("tokenStaleOutdated")}</strong>{state.data && <time dateTime={state.data.updatedAt}>{new Intl.DateTimeFormat(formatLocale, { dateStyle: "short", timeStyle: "medium" }).format(new Date(state.data.updatedAt))}</time>}</div></div>}
     {state.status === "error" && <div className="error-banner" role="alert"><div><strong>{t("tokenError")}</strong><span>{state.message}</span>{state.lastData && <time dateTime={state.lastData.updatedAt}>{new Intl.DateTimeFormat(formatLocale, { dateStyle: "short", timeStyle: "medium" }).format(new Date(state.lastData.updatedAt))}</time>}</div></div>}
     {data && data.sessions.length === 0 && <div className="token-state" role="status">{t("tokenEmpty")}</div>}
     {data && data.sessions.length > 0 && <>

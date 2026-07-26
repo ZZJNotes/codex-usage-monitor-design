@@ -28,7 +28,6 @@ export function useTokenUsage() {
     state,
     query(nextFilters: TokenUsageFilters) {
       setFilters(nextFilters);
-      void read(nextFilters);
     },
   };
 }

@@ -157,7 +157,9 @@ pub fn run() {
             });
             let token_lifecycle = app.state::<AppState>().lifecycle.clone();
             thread::spawn(move || {
-                let _ = token_usage.scan();
+                if !token_lifecycle.preferences().monitoring_paused {
+                    let _ = token_usage.scan();
+                }
                 let (watch_sender, watch_receiver) = mpsc::channel();
                 let _watcher = token_usage.watcher(watch_sender).ok();
                 let mut pending_change = false;
