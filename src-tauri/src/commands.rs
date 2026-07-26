@@ -214,7 +214,14 @@ pub(crate) fn set_notification_preferences(
     notifications: NotificationPolicy,
     state: State<'_, AppState>,
 ) -> Result<LifecyclePreferences, String> {
-    state.lifecycle.set_notifications(notifications)
+    set_notification_preferences_service(&state.lifecycle, notifications)
+}
+
+fn set_notification_preferences_service(
+    lifecycle: &crate::lifecycle::LifecycleService,
+    notifications: NotificationPolicy,
+) -> Result<LifecyclePreferences, String> {
+    lifecycle.set_notifications(notifications)
 }
 
 #[tauri::command]
@@ -225,7 +232,7 @@ pub(crate) fn show_dashboard(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -235,6 +242,20 @@ mod tests {
     use crate::quota::{
         QuotaAccount, QuotaFailureKind, QuotaRefreshError, QuotaSnapshot, QuotaSource,
     };
+
+    #[derive(Default)]
+    struct MemoryPreferenceStore(Mutex<Option<LifecyclePreferences>>);
+
+    impl crate::lifecycle::PreferenceStore for MemoryPreferenceStore {
+        fn load(&self) -> Result<Option<LifecyclePreferences>, String> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn save(&self, preferences: &LifecyclePreferences) -> Result<(), String> {
+            *self.0.lock().unwrap() = Some(preferences.clone());
+            Ok(())
+        }
+    }
 
     struct CountingSource {
         calls: AtomicUsize,
@@ -318,5 +339,35 @@ mod tests {
         assert!(dto.contains("\"reason\":\"transport\""));
         assert!(!dto.contains("secret diagnostic"));
         assert!(!dto.contains("abc123"));
+    }
+
+    #[test]
+    fn notification_ipc_contract_persists_validated_settings_and_typed_status() {
+        let lifecycle =
+            crate::lifecycle::LifecycleService::new(Arc::new(MemoryPreferenceStore::default()))
+                .unwrap();
+        let policy = NotificationPolicy {
+            quota_thresholds: vec![25, 5, 0],
+            ..NotificationPolicy::default()
+        };
+
+        let preferences = set_notification_preferences_service(&lifecycle, policy.clone()).unwrap();
+        let status = crate::notification::NotificationStatus {
+            active_conditions: vec![crate::notification::ActiveNotificationCondition {
+                key: "disk".into(),
+                kind: crate::notification::NotificationConditionKind::Disk,
+                label: "Disk available space ≤ 10%".into(),
+                account_id: None,
+            }],
+            ..crate::notification::NotificationStatus::default()
+        };
+        let dto = serde_json::to_value(status).unwrap();
+
+        assert_eq!(preferences.notifications, policy);
+        assert_eq!(dto["activeConditions"][0]["kind"], "disk");
+        assert_eq!(
+            dto["activeConditions"][0]["accountId"],
+            serde_json::Value::Null
+        );
     }
 }

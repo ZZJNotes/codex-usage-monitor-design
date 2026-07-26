@@ -69,7 +69,7 @@ beforeEach(() => {
     }
     if (command === "get_notification_status") {
       return Promise.resolve({
-        activeConditions: [{ key: "disk", label: "Disk available space ≤ 10%", accountId: null }],
+        activeConditions: [{ key: "disk", kind: "disk", label: "Disk available space ≤ 10%", accountId: null }],
         lastNotification: {
           sentAt: "2026-07-27T10:00:00Z",
           title: "磁盘可用空间不足",

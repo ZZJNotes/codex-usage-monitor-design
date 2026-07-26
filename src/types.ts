@@ -47,6 +47,7 @@ export type NotificationPolicy = {
 export type NotificationStatus = {
   activeConditions: Array<{
     key: string;
+    kind: "quota" | "authentication" | "refreshExpired" | "disk" | "memoryPressure";
     label: string;
     accountId: string | null;
   }>;

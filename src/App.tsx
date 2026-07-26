@@ -382,14 +382,14 @@ export function App() {
   }
 
   function activeConditionLabel(condition: NotificationStatus["activeConditions"][number]) {
-    if (condition.key === "disk") {
+    if (condition.kind === "disk") {
       return t("notificationDiskActive", {
         threshold: String(preferences.notifications.diskAvailablePercentThreshold),
       });
     }
-    if (condition.key === "memoryPressure") return t("notificationMemoryActive");
-    if (condition.key.startsWith("authentication:")) return t("notificationAuthActive");
-    if (condition.key.startsWith("refresh:")) {
+    if (condition.kind === "memoryPressure") return t("notificationMemoryActive");
+    if (condition.kind === "authentication") return t("notificationAuthActive");
+    if (condition.kind === "refreshExpired") {
       return t("notificationRefreshActive", {
         count: String(preferences.notifications.consecutiveRefreshFailures),
       });

@@ -94,7 +94,10 @@ fn current_quota_account_evidence(
     })
 }
 
-fn notification_account(state: &quota::QuotaState) -> (quota::AccountId, String) {
+fn notification_account(
+    state: &quota::QuotaState,
+    fallback_account_id: &quota::AccountId,
+) -> (quota::AccountId, String, bool) {
     let snapshot = match state {
         quota::QuotaState::Ready { snapshot, .. } | quota::QuotaState::Stale { snapshot, .. } => {
             Some(snapshot)
@@ -114,12 +117,14 @@ fn notification_account(state: &quota::QuotaState) -> (quota::AccountId, String)
             (
                 snapshot.account.id.clone(),
                 snapshot.account.display_name.clone(),
+                true,
             )
         })
         .unwrap_or_else(|| {
             (
-                quota::AccountId::from(CURRENT_CODEX_ACCOUNT_ID),
+                fallback_account_id.clone(),
                 "Current Codex account".to_string(),
+                false,
             )
         })
 }
@@ -283,6 +288,8 @@ pub fn run() {
             let quota_refresh = QuotaRefreshCoordinator::new(vec![quota]);
             thread::spawn(move || {
                 let mut previous_tick = Utc::now();
+                let fallback_notification_account =
+                    quota::AccountId::from(CURRENT_CODEX_ACCOUNT_ID);
                 loop {
                     if !quota_lifecycle.preferences().monitoring_paused {
                         let now = Utc::now();
@@ -294,11 +301,20 @@ pub fn run() {
                         previous_tick = now;
                         let preferences = quota_lifecycle.preferences();
                         let state = notification_quota.latest();
-                        let (account_id, display_name) = notification_account(&state);
+                        let (account_id, display_name, identity_verified) =
+                            notification_account(&state, &fallback_notification_account);
                         let locale = match preferences.locale {
                             lifecycle::Locale::ZhCn => NotificationLocale::Chinese,
                             lifecycle::Locale::En => NotificationLocale::English,
                         };
+                        if identity_verified {
+                            // This read-only source currently observes one account. A future
+                            // managed-account coordinator must pass its complete observed set.
+                            let _ = quota_notifications.retain_accounts(
+                                std::slice::from_ref(&account_id),
+                                &preferences.notifications,
+                            );
+                        }
                         let _ = quota_notifications.evaluate_account(
                             &account_id,
                             &display_name,
