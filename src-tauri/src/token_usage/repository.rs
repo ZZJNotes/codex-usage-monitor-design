@@ -15,26 +15,31 @@ pub(super) fn record_account_evidence(
     database: &Database,
     evidence: &ActiveAccountEvidence,
 ) -> Result<(), String> {
-    database.with_connection(|connection| {
-        connection
-            .execute(
-                "INSERT INTO token_accounts
-                   (account_key, display_name, last_evidence_source, last_evidence_at_utc)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(account_key) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   last_evidence_source = excluded.last_evidence_source,
-                   last_evidence_at_utc = excluded.last_evidence_at_utc",
-                params![
-                    evidence.account.account_key,
-                    evidence.account.display_name,
-                    evidence.source,
-                    evidence.observed_at,
-                ],
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    })
+    database.with_connection(|connection| upsert_account(connection, evidence))
+}
+
+fn upsert_account(
+    connection: &rusqlite::Connection,
+    evidence: &ActiveAccountEvidence,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO token_accounts
+               (account_key, display_name, last_evidence_source, last_evidence_at_utc)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_key) DO UPDATE SET
+               display_name = excluded.display_name,
+               last_evidence_source = excluded.last_evidence_source,
+               last_evidence_at_utc = excluded.last_evidence_at_utc",
+            params![
+                evidence.account.account_key,
+                evidence.account.display_name,
+                evidence.source,
+                evidence.observed_at,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn record_session_attribution(
@@ -47,23 +52,7 @@ pub(super) fn record_session_attribution(
             .transaction()
             .map_err(|error| error.to_string())?;
         if let Some(evidence) = evidence {
-            transaction
-                .execute(
-                    "INSERT INTO token_accounts
-                       (account_key, display_name, last_evidence_source, last_evidence_at_utc)
-                     VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(account_key) DO UPDATE SET
-                       display_name = excluded.display_name,
-                       last_evidence_source = excluded.last_evidence_source,
-                       last_evidence_at_utc = excluded.last_evidence_at_utc",
-                    params![
-                        evidence.account.account_key,
-                        evidence.account.display_name,
-                        evidence.source,
-                        evidence.observed_at,
-                    ],
-                )
-                .map_err(|error| error.to_string())?;
+            upsert_account(&transaction, evidence)?;
         }
         let assigned_at = Utc::now().to_rfc3339();
         transaction
