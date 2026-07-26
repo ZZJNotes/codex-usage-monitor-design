@@ -120,7 +120,7 @@ beforeEach(() => {
         launchAtLogin: false,
       });
     }
-    if (command === "cleanup_expired_history") {
+    if (command === "cleanup_expired_history" || command === "clear_history") {
       return Promise.resolve({ quotaSnapshotsDeleted: 1, tokenEventsDeleted: 2, systemAggregatesDeleted: 3, sessionAttributionsDeleted: 1, accountMetadataDeleted: 1 });
     }
     return Promise.reject(new Error(`unexpected command ${command}`));
@@ -271,8 +271,14 @@ test("offers local retention cleanup and safe export while explaining credential
 
   fireEvent.change(screen.getByLabelText("统计保留期"), { target: { value: "30" } });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_retention_days", { retentionDays: 30 }));
+  const historyReadsBeforeCleanup = invoke.mock.calls.filter(([command]) => command === "get_system_health_history").length;
   fireEvent.click(screen.getByRole("button", { name: "清理过期历史" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("cleanup_expired_history"));
+  await waitFor(() => {
+    expect(invoke.mock.calls.filter(([command]) => command === "get_system_health_history").length).toBeGreaterThan(historyReadsBeforeCleanup);
+    expect(invoke).toHaveBeenCalledWith("get_token_usage", { filters: {} });
+    expect(invoke).toHaveBeenCalledWith("get_quota_state");
+  });
   expect(await screen.findByText("本地数据操作已完成。")).toBeVisible();
 });
 
@@ -291,4 +297,11 @@ test("explains that a persisted pause survives restart until the user resumes", 
   expect(await screen.findByText(/重启后仍保持暂停/)).toBeVisible();
   expect(screen.getByRole("button", { name: "恢复监控" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "刷新额度" })).toBeDisabled();
+});
+
+test("UI state fixtures contain no credentials, session content, or work paths", () => {
+  const fixture = JSON.stringify({ quotaResponse, preferenceResponse }).toLowerCase();
+  for (const prohibited of ["access_token", "refresh_token", "id_token", "bearer ", "sk-", "eyj", "prompt", "reply", "command", "attachment", "work_path", "/users/"]) {
+    expect(fixture).not.toContain(prohibited);
+  }
 });

@@ -120,6 +120,7 @@ const messages = {
     governanceDone: "本地数据操作已完成。",
     governanceConfirmClear: "确定清空全部统计历史吗？此操作无法撤销。",
     governanceConfirmAccount: "确定删除所选账户的统计历史吗？凭据不会被删除。",
+    checkpointRetentionHelp: "清理会保留不含路径的导入进度，避免旧会话被自动重新导入；之后的新 Token 活动仍会继续记录。",
   },
   en: {
     appName: "Codex Usage Monitor",
@@ -240,6 +241,7 @@ const messages = {
     governanceDone: "Local data operation completed.",
     governanceConfirmClear: "Clear all statistics history? This cannot be undone.",
     governanceConfirmAccount: "Delete statistics history for the selected account? Credentials will remain.",
+    checkpointRetentionHelp: "Cleanup keeps path-free import progress so old sessions are not imported again. New Token activity continues to be recorded.",
   },
 } as const;
 

@@ -391,7 +391,19 @@ impl QuotaService {
                     schedule.last_recovery_at = Some(now);
                 }
                 RefreshTrigger::Automatic => {}
-                RefreshTrigger::Evidence => {}
+                RefreshTrigger::Evidence => {
+                    if let Some(retry_at) = schedule.manual_retry_at
+                        && now < retry_at
+                    {
+                        return self.latest();
+                    }
+                    if let Some(last_recovery_at) = schedule.last_recovery_at
+                        && now < last_recovery_at + chrono_duration(self.policy.manual_cooldown)
+                    {
+                        return self.latest();
+                    }
+                    schedule.last_recovery_at = Some(now);
+                }
             }
         }
 
@@ -811,6 +823,26 @@ mod tests {
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
         clock.advance(Duration::from_secs(50));
         assert!(matches!(service.recover_if_due(), QuotaState::Ready { .. }));
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn resume_evidence_refresh_obeys_recovery_cooldown() {
+        let clock = Arc::new(FakeClock(Mutex::new(
+            Utc.with_ymd_and_hms(2026, 7, 26, 12, 0, 0).unwrap(),
+        )));
+        let source = Arc::new(SequenceSource {
+            calls: AtomicUsize::new(0),
+            results: Mutex::new(VecDeque::from([Ok(snapshot(49)), Ok(snapshot(48))])),
+        });
+        let service = test_service(clock.clone(), source.clone());
+
+        service.refresh_account_evidence();
+        service.refresh_account_evidence();
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+
+        clock.advance(Duration::from_secs(30));
+        service.refresh_account_evidence();
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
     }
 

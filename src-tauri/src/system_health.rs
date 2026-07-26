@@ -125,6 +125,13 @@ impl SystemHealthService {
         self.history_at(Utc::now())
     }
 
+    pub fn clear_history(&self) {
+        self.history
+            .write()
+            .expect("health history poisoned")
+            .clear();
+    }
+
     fn history_at(&self, now: DateTime<Utc>) -> Vec<SystemHealthPoint> {
         let mut history = self.history.write().expect("health history poisoned");
         let cutoff = now - ChronoDuration::hours(1);
@@ -357,5 +364,19 @@ mod tests {
         assert_eq!(metrics.network_up_bytes_per_second, 0.0);
         let now = Utc.with_ymd_and_hms(2026, 7, 26, 10, 0, 0).unwrap();
         assert_eq!(service.history_at(now).len(), 1);
+    }
+
+    #[test]
+    fn clear_history_removes_the_observable_ring_without_hiding_the_live_metric() {
+        let source = Arc::new(SequenceSource {
+            snapshots: Mutex::new(vec![snapshot(0, 1_000, 2_000)]),
+        });
+        let service = SystemHealthService::new(source);
+        service.sample().unwrap();
+
+        service.clear_history();
+
+        assert!(service.history().is_empty());
+        assert!(matches!(service.latest(), SystemHealthState::Ready { .. }));
     }
 }

@@ -202,7 +202,9 @@ pub(crate) fn cleanup_expired_history(
 
 #[tauri::command]
 pub(crate) fn clear_history(state: State<'_, AppState>) -> Result<HistoryCleanupResult, String> {
-    state.governance.clear_history()
+    let result = state.governance.clear_history()?;
+    state.health.clear_history();
+    Ok(result)
 }
 
 #[tauri::command]

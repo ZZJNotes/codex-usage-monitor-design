@@ -1,8 +1,9 @@
-use chrono::{DateTime, Days, Utc};
-use rusqlite::params;
+use chrono::{DateTime, Utc};
+use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::{database::Database, quota::QuotaSnapshot};
+use crate::{database::Database, lifecycle::RetentionPeriod, quota::QuotaSnapshot};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -103,24 +104,37 @@ impl DataGovernanceService {
         retention_days: u32,
         now: DateTime<Utc>,
     ) -> Result<HistoryCleanupResult, String> {
-        if !(1..=3650).contains(&retention_days) {
-            return Err("retention days must be between 1 and 3650".to_string());
-        }
-        let cutoff = now
-            .checked_sub_days(Days::new(retention_days.into()))
-            .ok_or_else(|| "retention cutoff is outside the supported date range".to_string())?
-            .to_rfc3339();
+        let cutoff = RetentionPeriod::try_from(retention_days)?.cutoff(now)?;
+        self.cleanup_history(Some(cutoff.to_rfc3339()))
+    }
+
+    pub fn clear_history(&self) -> Result<HistoryCleanupResult, String> {
+        self.cleanup_history(None)
+    }
+
+    fn cleanup_history(&self, cutoff: Option<String>) -> Result<HistoryCleanupResult, String> {
         self.database.with_connection(|connection| {
-            let transaction = connection.transaction().map_err(|error| error.to_string())?;
-            let quota_snapshots_deleted = transaction
-                .execute("DELETE FROM quota_snapshots WHERE observed_at_utc < ?1", params![cutoff])
+            let transaction = connection
+                .transaction()
                 .map_err(|error| error.to_string())?;
-            let token_events_deleted = transaction
-                .execute("DELETE FROM token_usage_events WHERE observed_at_utc < ?1", params![cutoff])
-                .map_err(|error| error.to_string())?;
-            let system_aggregates_deleted = transaction
-                .execute("DELETE FROM system_health_aggregates WHERE bucket_start_utc < ?1", params![cutoff])
-                .map_err(|error| error.to_string())?;
+            let quota_snapshots_deleted = delete_time_scoped(
+                &transaction,
+                "quota_snapshots",
+                "observed_at_utc",
+                cutoff.as_deref(),
+            )?;
+            let token_events_deleted = delete_time_scoped(
+                &transaction,
+                "token_usage_events",
+                "observed_at_utc",
+                cutoff.as_deref(),
+            )?;
+            let system_aggregates_deleted = delete_time_scoped(
+                &transaction,
+                "system_health_aggregates",
+                "bucket_start_utc",
+                cutoff.as_deref(),
+            )?;
             let session_attributions_deleted = transaction
                 .execute(
                     "DELETE FROM token_session_attributions WHERE NOT EXISTS (SELECT 1 FROM token_usage_events event WHERE event.session_id = token_session_attributions.session_id)",
@@ -132,37 +146,6 @@ impl DataGovernanceService {
                     "DELETE FROM token_accounts WHERE NOT EXISTS (SELECT 1 FROM token_session_attributions attribution WHERE attribution.account_key = token_accounts.account_key)",
                     [],
                 )
-                .map_err(|error| error.to_string())?;
-            transaction.commit().map_err(|error| error.to_string())?;
-            Ok(HistoryCleanupResult {
-                quota_snapshots_deleted,
-                token_events_deleted,
-                system_aggregates_deleted,
-                session_attributions_deleted,
-                account_metadata_deleted,
-            })
-        })
-    }
-
-    pub fn clear_history(&self) -> Result<HistoryCleanupResult, String> {
-        self.database.with_connection(|connection| {
-            let transaction = connection
-                .transaction()
-                .map_err(|error| error.to_string())?;
-            let quota_snapshots_deleted = transaction
-                .execute("DELETE FROM quota_snapshots", [])
-                .map_err(|error| error.to_string())?;
-            let token_events_deleted = transaction
-                .execute("DELETE FROM token_usage_events", [])
-                .map_err(|error| error.to_string())?;
-            let system_aggregates_deleted = transaction
-                .execute("DELETE FROM system_health_aggregates", [])
-                .map_err(|error| error.to_string())?;
-            let session_attributions_deleted = transaction
-                .execute("DELETE FROM token_session_attributions", [])
-                .map_err(|error| error.to_string())?;
-            let account_metadata_deleted = transaction
-                .execute("DELETE FROM token_accounts", [])
                 .map_err(|error| error.to_string())?;
             transaction.commit().map_err(|error| error.to_string())?;
             Ok(HistoryCleanupResult {
@@ -294,7 +277,7 @@ impl DataGovernanceService {
                     Ok(TokenExportRow {
                         observed_at: row.get(0)?,
                         account_id: row.get(1)?,
-                        session_id: row.get(2)?,
+                        session_id: opaque_session_id(&row.get::<_, String>(2)?),
                         model: row.get(3)?,
                         input_tokens: nonnegative_u64(row.get(4)?),
                         cached_input_tokens: nonnegative_u64(row.get(5)?),
@@ -340,12 +323,39 @@ impl DataGovernanceService {
     }
 }
 
+fn delete_time_scoped(
+    transaction: &Transaction<'_>,
+    table: &str,
+    time_column: &str,
+    cutoff: Option<&str>,
+) -> Result<usize, String> {
+    let sql = match cutoff {
+        Some(_) => format!("DELETE FROM {table} WHERE {time_column} < ?1"),
+        None => format!("DELETE FROM {table}"),
+    };
+    match cutoff {
+        Some(cutoff) => transaction.execute(&sql, params![cutoff]),
+        None => transaction.execute(&sql, []),
+    }
+    .map_err(|error| error.to_string())
+}
+
 fn nonnegative_u64(value: i64) -> u64 {
     value.max(0) as u64
 }
 
+fn opaque_session_id(session_id: &str) -> String {
+    format!(
+        "session-{:x}",
+        Sha256::digest(format!("export-session:{session_id}").as_bytes())
+    )
+}
+
 fn csv_cell(value: impl ToString) -> String {
-    let value = value.to_string();
+    let mut value = value.to_string();
+    if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        value.insert(0, '\'');
+    }
     if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
@@ -434,11 +444,18 @@ fn csv_record(mut values: Vec<String>, columns: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use chrono::{TimeZone, Utc};
 
-    use crate::database::Database;
+    use crate::{
+        database::Database,
+        lifecycle::{LifecyclePreferences, PreferenceStore},
+        quota::{AccountId, QuotaAccount, QuotaSnapshot, QuotaStore, QuotaWindow},
+        token_usage::TokenUsageService,
+    };
 
-    use super::{CredentialDeletionStatus, DataGovernanceService, ExportFormat};
+    use super::{CredentialDeletionStatus, DataGovernanceService, ExportFormat, csv_cell};
 
     #[test]
     fn retention_cleanup_removes_only_history_older_than_the_saved_period() {
@@ -589,7 +606,7 @@ mod tests {
                 [],
             ).map_err(|error| error.to_string())?;
             connection.execute(
-                "INSERT INTO token_usage_events (event_key, source_key, observed_at_utc, session_id, model, input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens) VALUES ('event', 'opaque-source', '2026-07-01T00:00:01Z', 'opaque-session', 'gpt-test', 10, 2, 1, 5, 1, 15)",
+                "INSERT INTO token_usage_events (event_key, source_key, observed_at_utc, session_id, model, input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens) VALUES ('event', '/Users/alice/private/work', '2026-07-01T00:00:01Z', '/Users/alice/private/work', 'gpt-test', 10, 2, 1, 5, 1, 15)",
                 [],
             ).map_err(|error| error.to_string())?;
             connection.execute(
@@ -627,12 +644,15 @@ mod tests {
             "access_token",
             "refresh_token",
             "oauth",
+            "bearer ",
+            "sk-",
+            "eyj",
             "prompt",
             "reply",
             "command",
             "attachment",
             "work_path",
-            "/Users/",
+            "/users/",
         ] {
             assert!(!json.content.to_ascii_lowercase().contains(prohibited));
             assert!(!csv.content.to_ascii_lowercase().contains(prohibited));
@@ -655,6 +675,16 @@ mod tests {
                 "credential deletion requires the managed-account Keychain integration".to_string()
             )
         );
+    }
+
+    #[test]
+    fn csv_cells_neutralize_spreadsheet_formulas() {
+        assert_eq!(
+            csv_cell("=HYPERLINK(\"https://example.invalid\")"),
+            "\"'=HYPERLINK(\"\"https://example.invalid\"\")\""
+        );
+        assert_eq!(csv_cell("+SUM(1,2)"), "\"'+SUM(1,2)\"");
+        assert_eq!(csv_cell("safe"), "safe");
     }
 
     #[test]
@@ -684,5 +714,80 @@ mod tests {
                 "SQLite schema must not contain {prohibited}"
             );
         }
+    }
+
+    #[test]
+    fn privacy_regression_scans_sqlite_exports_and_the_absent_log_surface() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("monitor.sqlite3");
+        let database = Database::open(&database_path).unwrap();
+        PreferenceStore::save(&database, &LifecyclePreferences::default()).unwrap();
+        QuotaStore::save(
+            &database,
+            &AccountId::from("safe-account"),
+            &QuotaSnapshot {
+                account: QuotaAccount {
+                    id: "safe-account".into(),
+                    display_name: "safe@example.com".to_string(),
+                    plan_type: "plus".to_string(),
+                },
+                windows: vec![QuotaWindow {
+                    name: "primary".to_string(),
+                    remaining_percent: 50,
+                    resets_at: None,
+                    window_duration_minutes: Some(300),
+                }],
+                updated_at: Utc.with_ymd_and_hms(2026, 7, 27, 0, 0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/token");
+        let token_usage = TokenUsageService::new(database.clone(), vec![fixture_root]);
+        token_usage.scan().unwrap();
+        let governance = DataGovernanceService::new(database.clone());
+        let export = governance
+            .export(
+                ExportFormat::Json,
+                Utc.with_ymd_and_hms(2026, 7, 27, 0, 0, 0).unwrap(),
+            )
+            .unwrap();
+        drop(governance);
+        drop(token_usage);
+        drop(database);
+
+        let prohibited = [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "bearer ",
+            "sk-",
+            "eyj",
+            "prompt",
+            "reply",
+            "command",
+            "attachment",
+            "work_path",
+            "/users/",
+        ];
+        let mut sqlite_bytes = Vec::new();
+        let mut log_outputs = Vec::new();
+        for entry in fs::read_dir(directory.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                log_outputs.push(path);
+            } else if path.is_file() {
+                sqlite_bytes.extend(fs::read(path).unwrap());
+            }
+        }
+        let sqlite = String::from_utf8_lossy(&sqlite_bytes).to_ascii_lowercase();
+        let export = export.content.to_ascii_lowercase();
+        for marker in prohibited {
+            assert!(!sqlite.contains(marker), "SQLite leaked {marker}");
+            assert!(!export.contains(marker), "export leaked {marker}");
+        }
+        assert!(
+            log_outputs.is_empty(),
+            "the app must not create local log output"
+        );
     }
 }

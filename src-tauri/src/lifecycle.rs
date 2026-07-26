@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use chrono::{DateTime, Days, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::system_health::{SystemHealthService, SystemHealthState};
@@ -21,6 +22,32 @@ pub struct LifecyclePreferences {
 
 fn default_retention_days() -> u32 {
     90
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPeriod(u32);
+
+impl RetentionPeriod {
+    pub fn days(self) -> u32 {
+        self.0
+    }
+
+    pub fn cutoff(self, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+        now.checked_sub_days(Days::new(self.0.into()))
+            .ok_or_else(|| "retention cutoff is outside the supported date range".to_string())
+    }
+}
+
+impl TryFrom<u32> for RetentionPeriod {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if (1..=3650).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("retention days must be between 1 and 3650".to_string())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -114,16 +141,27 @@ impl LifecycleService {
         Ok(preferences)
     }
 
+    pub fn resume_after(
+        &self,
+        refresh_account_evidence: impl FnOnce(),
+    ) -> Result<LifecyclePreferences, String> {
+        let mut current = self.preferences.write().expect("preferences poisoned");
+        let mut next = current.clone();
+        next.monitoring_paused = false;
+        self.store.save(&next)?;
+        refresh_account_evidence();
+        *current = next.clone();
+        Ok(next)
+    }
+
     pub fn set_theme(&self, theme: &str) -> Result<LifecyclePreferences, String> {
         let theme = Theme::try_from(theme)?;
         self.update(|preferences| preferences.theme = theme)
     }
 
     pub fn set_retention_days(&self, retention_days: u32) -> Result<LifecyclePreferences, String> {
-        if !(1..=3650).contains(&retention_days) {
-            return Err("retention days must be between 1 and 3650".to_string());
-        }
-        self.update(|preferences| preferences.retention_days = retention_days)
+        let retention = RetentionPeriod::try_from(retention_days)?;
+        self.update(|preferences| preferences.retention_days = retention.days())
     }
 
     pub fn set_locale(&self, locale: &str) -> Result<LifecyclePreferences, String> {

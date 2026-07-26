@@ -26,6 +26,9 @@ export function useTokenUsage() {
 
   return {
     state,
+    refresh() {
+      return read(filters);
+    },
     query(nextFilters: TokenUsageFilters) {
       setFilters(nextFilters);
     },
