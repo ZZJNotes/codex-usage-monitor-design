@@ -1,0 +1,26 @@
+[package]
+name = "codex-usage-monitor"
+version = "0.1.0"
+description = "Local-first Codex usage and system health monitor"
+authors = ["ZZJNotes"]
+edition = "2024"
+
+[lib]
+name = "codex_usage_monitor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+chrono = { version = "0.4.42", features = ["serde"] }
+libc = "0.2.189"
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sysinfo = "=0.38.4"
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+thiserror = "2.0.17"
+
+[dev-dependencies]
+tempfile = "3.23.0"
