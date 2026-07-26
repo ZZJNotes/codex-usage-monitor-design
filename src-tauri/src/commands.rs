@@ -215,14 +215,12 @@ pub(crate) fn set_dock_visibility(
     app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let previous = state.lifecycle.preferences().show_in_dock;
-    sync_dock_visibility(&app, show_in_dock)?;
-    match state.lifecycle.set_show_in_dock(show_in_dock) {
-        Ok(preferences) => Ok(preferences),
-        Err(error) => {
-            let _ = sync_dock_visibility(&app, previous);
-            Err(error)
-        }
-    }
+    sync_and_persist_boolean_preference(
+        previous,
+        show_in_dock,
+        |value| sync_dock_visibility(&app, value),
+        |value| state.lifecycle.set_show_in_dock(value),
+    )
 }
 
 pub(crate) fn sync_dock_visibility(app: &AppHandle, show_in_dock: bool) -> Result<(), String> {
@@ -256,11 +254,25 @@ pub(crate) fn set_launch_at_login(
     app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let previous = state.lifecycle.preferences().launch_at_login;
-    sync_launch_at_login(&app, launch_at_login)?;
-    match state.lifecycle.set_launch_at_login(launch_at_login) {
+    sync_and_persist_boolean_preference(
+        previous,
+        launch_at_login,
+        |value| sync_launch_at_login(&app, value),
+        |value| state.lifecycle.set_launch_at_login(value),
+    )
+}
+
+fn sync_and_persist_boolean_preference(
+    previous: bool,
+    requested: bool,
+    sync_system: impl Fn(bool) -> Result<(), String>,
+    persist: impl FnOnce(bool) -> Result<LifecyclePreferences, String>,
+) -> Result<LifecyclePreferences, String> {
+    sync_system(requested)?;
+    match persist(requested) {
         Ok(preferences) => Ok(preferences),
         Err(error) => {
-            let _ = sync_launch_at_login(&app, previous);
+            let _ = sync_system(previous);
             Err(error)
         }
     }
@@ -371,6 +383,7 @@ pub(crate) fn show_dashboard(app: AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -401,6 +414,24 @@ mod tests {
     struct CountingSource {
         calls: AtomicUsize,
         result: Result<QuotaSnapshot, QuotaRefreshError>,
+    }
+
+    #[test]
+    fn boolean_system_preference_rolls_back_when_persistence_fails() {
+        let synchronized_values = RefCell::new(Vec::new());
+
+        let result = sync_and_persist_boolean_preference(
+            false,
+            true,
+            |value| {
+                synchronized_values.borrow_mut().push(value);
+                Ok(())
+            },
+            |_| Err("save failed".to_string()),
+        );
+
+        assert_eq!(result, Err("save failed".to_string()));
+        assert_eq!(synchronized_values.into_inner(), vec![true, false]);
     }
 
     impl QuotaSource for CountingSource {

@@ -85,6 +85,40 @@ impl StorageIssue {
     }
 }
 
+fn recover_storage_after_successful_health_write(
+    application_status: &RwLock<ApplicationStatus>,
+    governance: &DataGovernanceService,
+    retention_days: u32,
+    now: DateTime<Utc>,
+) {
+    let issue_detail = application_status
+        .read()
+        .expect("application status poisoned")
+        .storage_issue
+        .as_ref()
+        .map(|issue| issue.detail.clone());
+    let recovered_detail = match issue_detail.as_deref() {
+        Some("storageWriteFailed") => "storageWriteFailed",
+        Some("retentionCleanupFailed") => {
+            if governance.cleanup_retention(retention_days, now).is_err() {
+                return;
+            }
+            "retentionCleanupFailed"
+        }
+        _ => return,
+    };
+    let mut status = application_status
+        .write()
+        .expect("application status poisoned");
+    if status
+        .storage_issue
+        .as_ref()
+        .is_some_and(|issue| issue.detail == recovered_detail)
+    {
+        status.storage_issue = None;
+    }
+}
+
 struct CurrentQuotaAccountEvidence(Arc<QuotaService>);
 
 impl AccountEvidenceSource for CurrentQuotaAccountEvidence {
@@ -258,7 +292,7 @@ pub fn run() {
                 lifecycle: lifecycle.clone(),
                 quota: quota.clone(),
                 token_usage: token_usage.clone(),
-                governance,
+                governance: governance.clone(),
                 notifications: notifications.clone(),
                 application_status: application_status.clone(),
             });
@@ -304,10 +338,12 @@ pub fn run() {
                         );
                         match database.record_health_metrics(updated_at, &metrics) {
                             Ok(()) if !ephemeral_storage => {
-                                application_status
-                                    .write()
-                                    .expect("application status poisoned")
-                                    .storage_issue = None;
+                                recover_storage_after_successful_health_write(
+                                    &application_status,
+                                    &governance,
+                                    preferences.retention_days,
+                                    Utc::now(),
+                                );
                             }
                             Err(_) => {
                                 application_status
@@ -567,5 +603,45 @@ mod account_evidence_tests {
         ] {
             assert!(!diagnostics.contains(prohibited));
         }
+    }
+
+    #[test]
+    fn retention_failure_clears_only_after_cleanup_retry_succeeds() {
+        let database = Database::in_memory().unwrap();
+        let governance = DataGovernanceService::new(database);
+        let status = RwLock::new(ApplicationStatus {
+            storage_issue: Some(StorageIssue::retention_cleanup_failed()),
+        });
+
+        recover_storage_after_successful_health_write(&status, &governance, 30, Utc::now());
+
+        assert!(
+            status
+                .read()
+                .expect("application status poisoned")
+                .storage_issue
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn successful_health_write_does_not_hide_initialization_failure() {
+        let database = Database::in_memory().unwrap();
+        let governance = DataGovernanceService::new(database);
+        let status = RwLock::new(ApplicationStatus {
+            storage_issue: Some(StorageIssue::initialization_failed()),
+        });
+
+        recover_storage_after_successful_health_write(&status, &governance, 30, Utc::now());
+
+        assert_eq!(
+            status
+                .read()
+                .expect("application status poisoned")
+                .storage_issue
+                .as_ref()
+                .map(|issue| issue.detail.as_str()),
+            Some("storageInitializationFailed")
+        );
     }
 }
