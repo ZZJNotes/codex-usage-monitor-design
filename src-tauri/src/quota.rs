@@ -221,7 +221,12 @@ impl QuotaService {
         let now = clock.now();
         let first_refresh_at =
             now + chrono_duration(account_jitter(account_id.as_str(), policy.jitter));
-        let state = match store.as_ref().map(|store| store.load(&account_id)) {
+        let restored_snapshot = if account_id.as_str() == CURRENT_CODEX_ACCOUNT_ID {
+            None
+        } else {
+            store.as_ref().map(|store| store.load(&account_id))
+        };
+        let state = match restored_snapshot {
             Some(Ok(Some(snapshot))) => QuotaState::Ready {
                 snapshot,
                 next_refresh_at: first_refresh_at,
@@ -1067,6 +1072,27 @@ mod tests {
                 ..
             } if snapshot == &value
         ));
+    }
+
+    #[test]
+    fn current_codex_account_does_not_restore_an_unverified_previous_login_snapshot() {
+        let database = Arc::new(crate::database::Database::in_memory().unwrap());
+        let mut value = snapshot(62);
+        value.account.id = "previous-login".into();
+        let initial = QuotaService::with_store(
+            CURRENT_CODEX_ACCOUNT_ID,
+            Arc::new(StaticQuotaSource(value)),
+            database.clone(),
+        );
+        initial.manual_refresh();
+
+        let restarted = QuotaService::with_store(
+            CURRENT_CODEX_ACCOUNT_ID,
+            Arc::new(StaticQuotaSource(snapshot(80))),
+            database,
+        );
+
+        assert_eq!(restarted.latest(), QuotaState::Loading);
     }
 
     #[test]

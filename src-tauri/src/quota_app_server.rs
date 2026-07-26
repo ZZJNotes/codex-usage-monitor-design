@@ -127,7 +127,38 @@ impl CodexAppServerSource {
 impl QuotaSource for CodexAppServerSource {
     fn refresh(&self) -> Result<QuotaSnapshot, QuotaRefreshError> {
         let response = self.request().map_err(classify_app_server_error)?;
-        normalize_response(response, Utc::now()).map_err(classify_normalization_error)
+        normalize_response(response, Utc::now())
+            .map_err(QuotaNormalizationError::into_refresh_error)
+    }
+}
+
+#[derive(Debug)]
+enum QuotaNormalizationError {
+    Authentication(String),
+    InvalidResponse(String),
+}
+
+impl QuotaNormalizationError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::InvalidResponse(message.into())
+    }
+
+    fn into_refresh_error(self) -> QuotaRefreshError {
+        match self {
+            Self::Authentication(message) => {
+                QuotaRefreshError::new(QuotaFailureKind::Authentication, message)
+            }
+            Self::InvalidResponse(message) => {
+                QuotaRefreshError::new(QuotaFailureKind::InvalidResponse, message)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn message(self) -> String {
+        match self {
+            Self::Authentication(message) | Self::InvalidResponse(message) => message,
+        }
     }
 }
 
@@ -181,13 +212,16 @@ struct RateLimitWindow {
 fn normalize_response(
     response: AppServerQuotaResponse,
     observed_at: DateTime<Utc>,
-) -> Result<QuotaSnapshot, String> {
-    let Account::Chatgpt { email, plan_type } = response
-        .account
-        .account
-        .ok_or_else(|| "The current Codex login is not a ChatGPT account".to_string())?
+) -> Result<QuotaSnapshot, QuotaNormalizationError> {
+    let Account::Chatgpt { email, plan_type } = response.account.account.ok_or_else(|| {
+        QuotaNormalizationError::Authentication(
+            "The current Codex login is not a ChatGPT account".to_string(),
+        )
+    })?
     else {
-        return Err("The current Codex login is not a ChatGPT account".to_string());
+        return Err(QuotaNormalizationError::Authentication(
+            "The current Codex login is not a ChatGPT account".to_string(),
+        ));
     };
     let account_id = email
         .clone()
@@ -222,9 +256,9 @@ fn normalize_response(
                 serde_json::from_value::<RateLimitWindow>(value.clone())
                     .map(|window| (name, window))
                     .map_err(|error| {
-                        format!(
+                        QuotaNormalizationError::invalid(format!(
                             "{bucket_name} {name} did not match the quota window schema: {error}"
-                        )
+                        ))
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -235,15 +269,17 @@ fn normalize_response(
         });
         for (window_name, window) in named_windows {
             if !(0..=100).contains(&window.used_percent) {
-                return Err(format!(
+                return Err(QuotaNormalizationError::invalid(format!(
                     "{bucket_name} {window_name} has an invalid quota percentage"
-                ));
+                )));
             }
             let resets_at = window
                 .resets_at
                 .map(|timestamp| {
                     DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
-                        format!("{bucket_name} {window_name} has an invalid reset time")
+                        QuotaNormalizationError::invalid(format!(
+                            "{bucket_name} {window_name} has an invalid reset time"
+                        ))
                     })
                 })
                 .transpose()?;
@@ -264,15 +300,6 @@ fn normalize_response(
         windows,
         updated_at: observed_at,
     })
-}
-
-fn classify_normalization_error(message: String) -> QuotaRefreshError {
-    let kind = if message.contains("current Codex login is not a ChatGPT account") {
-        QuotaFailureKind::Authentication
-    } else {
-        QuotaFailureKind::InvalidResponse
-    };
-    QuotaRefreshError::new(kind, message)
 }
 
 fn classify_app_server_error(message: String) -> QuotaRefreshError {
@@ -315,6 +342,7 @@ pub(crate) fn normalize_responses(
         },
         observed_at,
     )
+    .map_err(QuotaNormalizationError::message)
 }
 
 fn send_request(stdin: &mut impl Write, request: Value) -> Result<(), String> {
@@ -395,9 +423,8 @@ mod tests {
 
     #[test]
     fn missing_chatgpt_account_is_an_authentication_failure() {
-        let error = classify_normalization_error(
-            "The current Codex login is not a ChatGPT account".to_string(),
-        );
+        let error = QuotaNormalizationError::Authentication("account missing".to_string())
+            .into_refresh_error();
 
         assert_eq!(error.kind, QuotaFailureKind::Authentication);
     }
