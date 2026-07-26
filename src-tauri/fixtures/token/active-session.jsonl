@@ -1,0 +1,7 @@
+{"timestamp":"2026-07-20T10:00:00Z","type":"session_meta","payload":{"id":"sanitized-session-01","cwd":"/REDACTED/never-store"}}
+{"timestamp":"2026-07-20T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.6","cwd":"/REDACTED/never-store"}}
+{"timestamp":"2026-07-20T10:00:02Z","type":"response_item","payload":{"type":"message","content":[{"type":"input_text","text":"PRIVATE_FIXTURE_SENTINEL"}]}}
+{"timestamp":"2026-07-20T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":12,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":999},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":500,"reasoning_output_tokens":100,"total_tokens":1500}}}}
+{"timestamp":"2026-07-20T10:00:04Z","type":"future_event","payload":{"anything":"ignored"}}
+not valid json
+{"timestamp":"2026-07-20T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"cached_input_tokens":5,"output_tokens":10,"reasoning_output_tokens":2,"total_tokens":30}}}}

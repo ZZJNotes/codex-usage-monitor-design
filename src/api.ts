@@ -5,6 +5,8 @@ import type {
   HealthState,
   LifecyclePreferences,
   QuotaState,
+  TokenUsageFilters,
+  TokenUsageState,
 } from "./types";
 
 export const monitorApi = {
@@ -17,6 +19,10 @@ export const monitorApi = {
     invoke<ApplicationStatus>("get_application_status"),
   getQuota: () => invoke<QuotaState>("get_quota_state"),
   refreshQuota: () => invoke<QuotaState>("refresh_quota"),
+  getTokenUsage: (filters: TokenUsageFilters = {}) =>
+    invoke<TokenUsageState>("get_token_usage", { filters }),
+  refreshTokenUsage: (filters: TokenUsageFilters = {}) =>
+    invoke<TokenUsageState>("refresh_token_usage", { filters }),
   getPreferences: () =>
     invoke<LifecyclePreferences>("get_lifecycle_preferences"),
   setPaused: (paused: boolean) =>

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { monitorApi } from "./api";
 import { translator } from "./i18n";
+import { TokenUsageSection } from "./token-usage/TokenUsageSection";
+import { useTokenUsage } from "./token-usage/useTokenUsage";
 import type {
   ApplicationStatus,
   HealthMetrics,
@@ -201,6 +203,7 @@ export function App() {
   const [applicationStatus, setApplicationStatus] = useState<ApplicationStatus>({ storageIssue: null });
   const [quota, setQuota] = useState<QuotaState>({ status: "loading" });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
+  const tokenUsage = useTokenUsage();
   const [requestError, setRequestError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
@@ -371,6 +374,13 @@ export function App() {
             </article>)}
           </div>}
         </section>
+
+        <TokenUsageSection
+          state={tokenUsage.state}
+          locale={preferences.locale}
+          formatLocale={formatLocale}
+          onQuery={tokenUsage.query}
+        />
 
         {healthView.notice === "loading" && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
         {healthView.notice === "empty" && <div className="state-panel" role="status">{t("empty")}</div>}

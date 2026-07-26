@@ -7,6 +7,7 @@ use crate::{
     quota::QuotaState,
     show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
+    token_usage::{TokenUsageFilters, TokenUsageState},
     tray::{TrayMenuItems, update_tray_locale, update_tray_text},
 };
 
@@ -56,6 +57,31 @@ pub(crate) fn refresh_quota(state: State<'_, AppState>) -> QuotaState {
         return state.quota.paused();
     }
     state.quota.refresh()
+}
+
+#[tauri::command]
+pub(crate) fn get_token_usage(
+    filters: TokenUsageFilters,
+    state: State<'_, AppState>,
+) -> TokenUsageState {
+    let current = state.token_usage.query(filters);
+    if state.lifecycle.preferences().monitoring_paused {
+        current.paused()
+    } else {
+        current
+    }
+}
+
+#[tauri::command]
+pub(crate) fn refresh_token_usage(
+    filters: TokenUsageFilters,
+    state: State<'_, AppState>,
+) -> TokenUsageState {
+    if state.lifecycle.preferences().monitoring_paused {
+        return state.token_usage.query(filters).paused();
+    }
+    let _ = state.token_usage.scan();
+    state.token_usage.query(filters)
 }
 
 #[tauri::command]

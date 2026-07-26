@@ -5,19 +5,21 @@ pub mod platform_metrics;
 pub mod quota;
 mod quota_app_server;
 pub mod system_health;
+pub mod token_usage;
 mod tray;
 
 use std::{
     fs,
+    sync::mpsc::{self, RecvTimeoutError},
     sync::{Arc, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use commands::{
     get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
-    get_system_health_history, refresh_quota, refresh_system_health, set_locale,
-    set_monitoring_paused, set_theme, show_dashboard,
+    get_system_health_history, get_token_usage, refresh_quota, refresh_system_health,
+    refresh_token_usage, set_locale, set_monitoring_paused, set_theme, show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
@@ -27,12 +29,14 @@ use quota_app_server::CodexAppServerSource;
 use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{ActivationPolicy, AppHandle, Manager, Runtime, WindowEvent};
+use token_usage::TokenUsageService;
 use tray::setup_tray;
 
 pub(crate) struct AppState {
     pub(crate) health: Arc<SystemHealthService>,
     pub(crate) lifecycle: Arc<LifecycleService>,
     pub(crate) quota: Arc<QuotaService>,
+    pub(crate) token_usage: Arc<TokenUsageService>,
     pub(crate) application_status: Arc<RwLock<ApplicationStatus>>,
 }
 
@@ -66,6 +70,8 @@ pub fn run() {
             refresh_system_health,
             get_quota_state,
             refresh_quota,
+            get_token_usage,
+            refresh_token_usage,
             get_application_status,
             get_lifecycle_preferences,
             set_monitoring_paused,
@@ -98,11 +104,13 @@ pub fn run() {
                     QuotaService::unavailable_with_store(message, Arc::new(database.clone()))
                 }
             });
+            let token_usage = Arc::new(TokenUsageService::default_roots(database.clone()));
             let application_status = Arc::new(RwLock::new(ApplicationStatus { storage_issue }));
             app.manage(AppState {
                 health: health.clone(),
                 lifecycle: lifecycle.clone(),
                 quota: quota.clone(),
+                token_usage: token_usage.clone(),
                 application_status: application_status.clone(),
             });
             let preferences = lifecycle.preferences();
@@ -151,6 +159,40 @@ pub fn run() {
                         quota.refresh();
                     }
                     thread::sleep(Duration::from_secs(600));
+                }
+            });
+            let token_lifecycle = app.state::<AppState>().lifecycle.clone();
+            thread::spawn(move || {
+                if !token_lifecycle.preferences().monitoring_paused {
+                    let _ = token_usage.scan();
+                }
+                let (watch_sender, watch_receiver) = mpsc::channel();
+                let _watcher = token_usage.watcher(watch_sender).ok();
+                let mut pending_change = false;
+                let mut was_paused = token_lifecycle.preferences().monitoring_paused;
+                let mut last_reconciliation = Instant::now();
+                loop {
+                    match watch_receiver.recv_timeout(Duration::from_secs(2)) {
+                        Ok(()) => {
+                            pending_change = true;
+                            while watch_receiver
+                                .recv_timeout(Duration::from_millis(300))
+                                .is_ok()
+                            {}
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            thread::sleep(Duration::from_secs(2))
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                    }
+                    let paused = token_lifecycle.preferences().monitoring_paused;
+                    let reconcile = last_reconciliation.elapsed() >= Duration::from_secs(30);
+                    if !paused && (pending_change || reconcile || was_paused) {
+                        let _ = token_usage.scan();
+                        pending_change = false;
+                        last_reconciliation = Instant::now();
+                    }
+                    was_paused = paused;
                 }
             });
             Ok(())

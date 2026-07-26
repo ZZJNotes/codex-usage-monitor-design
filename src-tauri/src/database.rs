@@ -18,6 +18,17 @@ pub struct Database {
 }
 
 impl Database {
+    pub(crate) fn with_connection<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())?;
+        operation(&mut connection)
+    }
+
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
         let database = Self {
@@ -66,6 +77,32 @@ impl Database {
                    observed_at_utc TEXT NOT NULL,
                    snapshot_json TEXT NOT NULL,
                    PRIMARY KEY (account_key, observed_at_utc)
+                 );
+                 CREATE TABLE IF NOT EXISTS token_usage_events (
+                   event_key TEXT PRIMARY KEY,
+                   source_key TEXT NOT NULL,
+                   observed_at_utc TEXT NOT NULL,
+                   session_id TEXT NOT NULL,
+                   model TEXT NOT NULL,
+                   input_tokens INTEGER NOT NULL,
+                   cached_input_tokens INTEGER NOT NULL,
+                   cache_write_input_tokens INTEGER NOT NULL,
+                   output_tokens INTEGER NOT NULL,
+                   reasoning_output_tokens INTEGER NOT NULL,
+                   total_tokens INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS token_usage_time_idx
+                   ON token_usage_events(observed_at_utc);
+                 CREATE INDEX IF NOT EXISTS token_usage_model_time_idx
+                   ON token_usage_events(model, observed_at_utc);
+                 CREATE INDEX IF NOT EXISTS token_usage_session_time_idx
+                   ON token_usage_events(session_id, observed_at_utc);
+                 CREATE TABLE IF NOT EXISTS token_import_checkpoints (
+                   source_key TEXT PRIMARY KEY,
+                   byte_offset INTEGER NOT NULL,
+                   file_size INTEGER NOT NULL,
+                   parser_context_json TEXT NOT NULL,
+                   updated_at_utc TEXT NOT NULL
                  );",
             )
             .map_err(|error| error.to_string())
