@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::quota::{QuotaAccount, QuotaSnapshot, QuotaSource, QuotaWindow};
+use crate::quota::{
+    QuotaAccount, QuotaFailureKind, QuotaRefreshError, QuotaSnapshot, QuotaSource, QuotaWindow,
+};
 
 pub struct CodexAppServerSource {
     executable: PathBuf,
@@ -123,9 +125,40 @@ impl CodexAppServerSource {
 }
 
 impl QuotaSource for CodexAppServerSource {
-    fn refresh(&self) -> Result<QuotaSnapshot, String> {
-        let response = self.request()?;
+    fn refresh(&self) -> Result<QuotaSnapshot, QuotaRefreshError> {
+        let response = self.request().map_err(classify_app_server_error)?;
         normalize_response(response, Utc::now())
+            .map_err(QuotaNormalizationError::into_refresh_error)
+    }
+}
+
+#[derive(Debug)]
+enum QuotaNormalizationError {
+    Authentication(String),
+    InvalidResponse(String),
+}
+
+impl QuotaNormalizationError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::InvalidResponse(message.into())
+    }
+
+    fn into_refresh_error(self) -> QuotaRefreshError {
+        match self {
+            Self::Authentication(message) => {
+                QuotaRefreshError::new(QuotaFailureKind::Authentication, message)
+            }
+            Self::InvalidResponse(message) => {
+                QuotaRefreshError::new(QuotaFailureKind::InvalidResponse, message)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn message(self) -> String {
+        match self {
+            Self::Authentication(message) | Self::InvalidResponse(message) => message,
+        }
     }
 }
 
@@ -179,14 +212,20 @@ struct RateLimitWindow {
 fn normalize_response(
     response: AppServerQuotaResponse,
     observed_at: DateTime<Utc>,
-) -> Result<QuotaSnapshot, String> {
-    let Account::Chatgpt { email, plan_type } = response
-        .account
-        .account
-        .ok_or_else(|| "The current Codex login is not a ChatGPT account".to_string())?
+) -> Result<QuotaSnapshot, QuotaNormalizationError> {
+    let Account::Chatgpt { email, plan_type } = response.account.account.ok_or_else(|| {
+        QuotaNormalizationError::Authentication(
+            "The current Codex login is not a ChatGPT account".to_string(),
+        )
+    })?
     else {
-        return Err("The current Codex login is not a ChatGPT account".to_string());
+        return Err(QuotaNormalizationError::Authentication(
+            "The current Codex login is not a ChatGPT account".to_string(),
+        ));
     };
+    let account_id = email
+        .clone()
+        .unwrap_or_else(|| "chatgpt-account-without-email".to_string());
     let display_name = email.unwrap_or_else(|| "ChatGPT account".to_string());
     let mut buckets = response
         .rate_limits
@@ -217,9 +256,9 @@ fn normalize_response(
                 serde_json::from_value::<RateLimitWindow>(value.clone())
                     .map(|window| (name, window))
                     .map_err(|error| {
-                        format!(
+                        QuotaNormalizationError::invalid(format!(
                             "{bucket_name} {name} did not match the quota window schema: {error}"
-                        )
+                        ))
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -230,15 +269,17 @@ fn normalize_response(
         });
         for (window_name, window) in named_windows {
             if !(0..=100).contains(&window.used_percent) {
-                return Err(format!(
+                return Err(QuotaNormalizationError::invalid(format!(
                     "{bucket_name} {window_name} has an invalid quota percentage"
-                ));
+                )));
             }
             let resets_at = window
                 .resets_at
                 .map(|timestamp| {
                     DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
-                        format!("{bucket_name} {window_name} has an invalid reset time")
+                        QuotaNormalizationError::invalid(format!(
+                            "{bucket_name} {window_name} has an invalid reset time"
+                        ))
                     })
                 })
                 .transpose()?;
@@ -252,12 +293,39 @@ fn normalize_response(
     }
     Ok(QuotaSnapshot {
         account: QuotaAccount {
+            id: account_id.into(),
             display_name,
             plan_type,
         },
         windows,
         updated_at: observed_at,
     })
+}
+
+fn classify_app_server_error(message: String) -> QuotaRefreshError {
+    let lowercase = message.to_ascii_lowercase();
+    let kind = if lowercase.contains("did not match its schema")
+        || lowercase.contains("did not contain a result")
+    {
+        QuotaFailureKind::InvalidResponse
+    } else if lowercase.contains("auth")
+        || lowercase.contains("login")
+        || lowercase.contains("unauthorized")
+        || lowercase.contains("forbidden")
+        || lowercase.contains("401")
+        || lowercase.contains("403")
+    {
+        QuotaFailureKind::Authentication
+    } else if lowercase.contains("timed out")
+        || lowercase.contains("could not start")
+        || lowercase.contains("connect")
+        || lowercase.contains("offline")
+    {
+        QuotaFailureKind::Transport
+    } else {
+        QuotaFailureKind::Service
+    };
+    QuotaRefreshError::new(kind, message)
 }
 
 #[cfg(test)]
@@ -274,6 +342,7 @@ pub(crate) fn normalize_responses(
         },
         observed_at,
     )
+    .map_err(QuotaNormalizationError::message)
 }
 
 fn send_request(stdin: &mut impl Write, request: Value) -> Result<(), String> {
@@ -346,4 +415,17 @@ fn resolve_codex_executable() -> Option<PathBuf> {
 
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_chatgpt_account_is_an_authentication_failure() {
+        let error = QuotaNormalizationError::Authentication("account missing".to_string())
+            .into_refresh_error();
+
+        assert_eq!(error.kind, QuotaFailureKind::Authentication);
+    }
 }

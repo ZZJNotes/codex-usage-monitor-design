@@ -63,22 +63,28 @@ function toHealthView(health: HealthState, paused: boolean): HealthView {
 
 type QuotaView = {
   snapshot: QuotaSnapshot | null;
-  notice: "loading" | "error" | null;
-  error: "paused" | "storage" | "unavailable" | null;
+  notice: "loading" | "stale" | "error" | "cooldown" | null;
+  error: "paused" | "storage" | "reauthorization" | "transport" | "service" | "invalidResponse" | "unavailable" | null;
+  retryAt: string | null;
 };
 
 function toQuotaView(quota: QuotaState): QuotaView {
   switch (quota.status) {
     case "loading":
-      return { snapshot: null, notice: "loading", error: null };
+      return { snapshot: null, notice: "loading", error: null, retryAt: null };
     case "ready":
-      return { snapshot: quota.snapshot, notice: null, error: null };
+      return { snapshot: quota.snapshot, notice: null, error: null, retryAt: null };
+    case "stale":
+      return { snapshot: quota.snapshot, notice: "stale", error: quota.reason, retryAt: quota.retryAt };
     case "error":
       return {
         snapshot: quota.lastSnapshot,
         notice: "error",
         error: quota.reason,
+        retryAt: quota.retryAt,
       };
+    case "cooldown":
+      return { snapshot: quota.snapshot, notice: "cooldown", error: null, retryAt: quota.retryAt };
   }
 }
 
@@ -204,6 +210,7 @@ export function App() {
   const [quota, setQuota] = useState<QuotaState>({ status: "loading" });
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const tokenUsage = useTokenUsage();
+  const [quotaClock, setQuotaClock] = useState(() => Date.now());
   const [requestError, setRequestError] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
@@ -247,9 +254,14 @@ export function App() {
 
   const readQuota = useCallback(async () => {
     try {
-      setQuota(await monitorApi.getQuota());
+      const nextQuota = await monitorApi.getQuota();
+      setQuota((currentQuota) => currentQuota.status === "cooldown"
+        && new Date(currentQuota.retryAt).getTime() > Date.now()
+        && nextQuota.status === "ready"
+        ? currentQuota
+        : nextQuota);
     } catch (error) {
-      setQuota({ status: "error", reason: "unavailable", lastSnapshot: null });
+      setQuota({ status: "error", reason: "unavailable", lastSnapshot: null, failedAt: new Date().toISOString(), retryAt: null });
     }
   }, []);
 
@@ -258,7 +270,7 @@ export function App() {
     try {
       setQuota(await monitorApi.refreshQuota());
     } catch (error) {
-      setQuota({ status: "error", reason: "unavailable", lastSnapshot: null });
+      setQuota({ status: "error", reason: "unavailable", lastSnapshot: null, failedAt: new Date().toISOString(), retryAt: null });
     } finally {
       setQuotaRefreshing(false);
     }
@@ -279,6 +291,33 @@ export function App() {
       window.clearInterval(quotaTimer);
     };
   }, [readQuota, refresh, refreshHistory, refreshPreferences]);
+
+  useEffect(() => {
+    async function recoverQuota() {
+      if (preferences.monitoringPaused) return;
+      try {
+        setQuota(await monitorApi.recoverQuota());
+      } catch {
+        // The regular state poll remains the source of truth if recovery IPC is unavailable.
+      }
+    }
+    function recoverWhenVisible() {
+      if (document.visibilityState === "visible") void recoverQuota();
+    }
+    window.addEventListener("online", recoverQuota);
+    window.addEventListener("pageshow", recoverQuota);
+    document.addEventListener("visibilitychange", recoverWhenVisible);
+    return () => {
+      window.removeEventListener("online", recoverQuota);
+      window.removeEventListener("pageshow", recoverQuota);
+      document.removeEventListener("visibilitychange", recoverWhenVisible);
+    };
+  }, [preferences.monitoringPaused]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setQuotaClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     document.documentElement.lang = preferences.locale;
@@ -315,6 +354,23 @@ export function App() {
   const updatedAt = healthView.updatedAt;
   const quotaView = toQuotaView(quota);
   const quotaSnapshot = quotaView.snapshot;
+  const quotaRetrySeconds = quotaView.retryAt
+    ? Math.max(0, Math.ceil((new Date(quotaView.retryAt).getTime() - quotaClock) / 1_000))
+    : 0;
+  const quotaCoolingDown = quotaRetrySeconds > 0;
+  const quotaErrorDetail = quotaView.error === "paused"
+    ? t("quotaPaused")
+    : quotaView.error === "storage"
+      ? t("quotaStorageRecovery")
+      : quotaView.error === "reauthorization"
+        ? t("quotaReauthorizationRecovery")
+        : quotaView.error === "transport"
+          ? t("quotaTransportRecovery")
+          : quotaView.error === "service"
+            ? t("quotaServiceRecovery")
+            : quotaView.error === "invalidResponse"
+              ? t("quotaCompatibilityRecovery")
+              : t("quotaRecovery");
 
   return (
     <div className="app-shell">
@@ -358,12 +414,18 @@ export function App() {
               <h2 id="quota-heading">{t("quotaTitle")}</h2>
               <p>{t("quotaSubtitle")}</p>
             </div>
-            <button type="button" onClick={() => void refreshQuota()} disabled={quotaRefreshing || preferences.monitoringPaused}>
-              {quotaRefreshing ? t("quotaLoading") : t("quotaRefresh")}
+            <button type="button" onClick={() => void refreshQuota()} disabled={quotaRefreshing || preferences.monitoringPaused || quotaCoolingDown}>
+              {quotaRefreshing
+                ? t("quotaLoading")
+                : quotaCoolingDown
+                  ? t("quotaRefreshAfter", { seconds: new Intl.NumberFormat(formatLocale).format(quotaRetrySeconds) })
+                  : t("quotaRefresh")}
             </button>
           </div>
           {quotaView.notice === "loading" && <div className="quota-state" role="status">{t("quotaLoading")}</div>}
-          {quotaView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{t("quotaError")}</strong><span>{quotaView.error === "paused" ? t("quotaPaused") : quotaView.error === "storage" ? t("quotaStorageRecovery") : t("quotaRecovery")}</span></div></div>}
+          {quotaView.notice === "stale" && <div className="error-banner" role="status"><div><strong>{t("quotaStale")}</strong><span>{quotaErrorDetail} {t("quotaLastSnapshot")}</span></div></div>}
+          {quotaView.notice === "cooldown" && <div className="quota-state" role="status"><strong>{t("quotaCooldown")}</strong> · {t("quotaRefreshAfter", { seconds: new Intl.NumberFormat(formatLocale).format(quotaRetrySeconds) })}</div>}
+          {quotaView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{quotaView.error === "reauthorization" ? t("quotaReauthorization") : t("quotaError")}</strong><span>{quotaErrorDetail}</span></div></div>}
           {quotaSnapshot && <div className="account-line"><span>{t("currentAccount")}: <strong>{quotaSnapshot.account.displayName}</strong></span><span>{t("plan")}: <strong>{quotaSnapshot.account.planType}</strong></span><time dateTime={quotaSnapshot.updatedAt}>{t("updated")} {new Intl.DateTimeFormat(formatLocale, { hour: "2-digit", minute: "2-digit" }).format(new Date(quotaSnapshot.updatedAt))}</time></div>}
           {quotaSnapshot && quotaSnapshot.windows.length === 0 && <div className="quota-state" role="status">{t("quotaEmpty")}</div>}
           {quotaSnapshot && quotaSnapshot.windows.length > 0 && <div className="quota-grid">
