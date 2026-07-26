@@ -20,8 +20,8 @@ use chrono::Utc;
 use commands::{
     get_application_status, get_lifecycle_preferences, get_quota_state, get_system_health,
     get_system_health_history, get_token_usage, recover_quota, refresh_quota,
-    refresh_system_health, refresh_token_usage, set_locale, set_monitoring_paused, set_theme,
-    show_dashboard,
+    refresh_system_health, refresh_token_usage, set_locale, set_menu_bar_preferences,
+    set_monitoring_paused, set_theme, show_dashboard,
 };
 use database::Database;
 use lifecycle::LifecycleService;
@@ -32,7 +32,7 @@ use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{ActivationPolicy, AppHandle, Manager, Runtime, WindowEvent};
 use token_usage::TokenUsageService;
-use tray::setup_tray;
+use tray::{TrayMenuItems, setup_tray, update_tray};
 
 pub(crate) struct AppState {
     pub(crate) health: Arc<SystemHealthService>,
@@ -80,6 +80,7 @@ pub fn run() {
             set_monitoring_paused,
             set_theme,
             set_locale,
+            set_menu_bar_preferences,
             show_dashboard,
         ])
         .setup(|app| {
@@ -121,11 +122,15 @@ pub fn run() {
                 application_status: application_status.clone(),
             });
             let preferences = lifecycle.preferences();
-            app.manage(setup_tray(
-                app.handle(),
-                preferences.locale,
-                preferences.monitoring_paused,
-            )?);
+            app.manage(setup_tray(app.handle(), &preferences)?);
+            let tray_app = app.handle().clone();
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    let tray = tray_app.state::<TrayMenuItems>();
+                    update_tray(&tray_app, &tray);
+                }
+            });
 
             #[cfg(target_os = "macos")]
             app.set_activation_policy(ActivationPolicy::Accessory);

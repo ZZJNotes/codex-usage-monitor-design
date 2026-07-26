@@ -5,7 +5,10 @@ use std::sync::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::system_health::{SystemHealthService, SystemHealthState};
+use crate::{
+    quota::AccountId,
+    system_health::{SystemHealthService, SystemHealthState},
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +18,32 @@ pub struct LifecyclePreferences {
     pub theme: Theme,
     pub show_in_dock: bool,
     pub launch_at_login: bool,
+    #[serde(default)]
+    pub menu_bar: MenuBarPreferences,
+}
+
+pub const MAX_MENU_BAR_PARAMETERS: u8 = 5;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuBarPreferences {
+    pub parameter_ids: Vec<String>,
+    pub display_limit: u8,
+    pub pinned_account_id: Option<AccountId>,
+}
+
+impl Default for MenuBarPreferences {
+    fn default() -> Self {
+        Self {
+            parameter_ids: vec![
+                "cpu".into(),
+                "memoryPressure".into(),
+                "diskAvailable".into(),
+            ],
+            display_limit: 3,
+            pinned_account_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -66,6 +95,7 @@ impl Default for LifecyclePreferences {
             theme: Theme::System,
             show_in_dock: false,
             launch_at_login: false,
+            menu_bar: MenuBarPreferences::default(),
         }
     }
 }
@@ -117,6 +147,14 @@ impl LifecycleService {
         self.update(|preferences| preferences.locale = locale)
     }
 
+    pub fn set_menu_bar(
+        &self,
+        menu_bar: MenuBarPreferences,
+    ) -> Result<LifecyclePreferences, String> {
+        validate_menu_bar(&menu_bar)?;
+        self.update(|preferences| preferences.menu_bar = menu_bar)
+    }
+
     fn update(
         &self,
         change: impl FnOnce(&mut LifecyclePreferences),
@@ -142,6 +180,43 @@ impl LifecycleService {
             health.sample().map(Some)
         }
     }
+}
+
+fn validate_menu_bar(menu_bar: &MenuBarPreferences) -> Result<(), String> {
+    if !(1..=MAX_MENU_BAR_PARAMETERS).contains(&menu_bar.display_limit) {
+        return Err(format!(
+            "display limit must be between 1 and {MAX_MENU_BAR_PARAMETERS}"
+        ));
+    }
+    if menu_bar.parameter_ids.len() > 12 {
+        return Err("too many menu bar parameters".to_string());
+    }
+    let mut unique = std::collections::HashSet::new();
+    for id in &menu_bar.parameter_ids {
+        if id.len() > 128 {
+            return Err("menu bar parameter id is too long".to_string());
+        }
+        let supported = matches!(
+            id.as_str(),
+            "cpu" | "memoryPressure" | "diskAvailable" | "networkDown" | "battery" | "uptime"
+        ) || id
+            .strip_prefix("quotaWindow:")
+            .is_some_and(|name| !name.trim().is_empty());
+        if !supported {
+            return Err(format!("unsupported menu bar parameter: {id}"));
+        }
+        if !unique.insert(id.clone()) {
+            return Err(format!("duplicate menu bar parameter: {id}"));
+        }
+    }
+    if menu_bar
+        .pinned_account_id
+        .as_ref()
+        .is_some_and(|id| id.as_str().trim().is_empty() || id.as_str().len() > 256)
+    {
+        return Err("pinned account id must not be empty".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -235,5 +310,49 @@ mod tests {
             Err("unsupported theme".to_string())
         );
         assert_eq!(lifecycle.preferences(), LifecyclePreferences::default());
+    }
+
+    #[test]
+    fn saves_ordered_menu_bar_parameters_and_rejects_invalid_or_duplicate_ids() {
+        let store = Arc::new(MemoryPreferenceStore::default());
+        let lifecycle = LifecycleService::new(store.clone()).unwrap();
+        let saved = lifecycle
+            .set_menu_bar(MenuBarPreferences {
+                parameter_ids: vec!["quotaWindow:codex primary".into(), "cpu".into()],
+                display_limit: 2,
+                pinned_account_id: Some("account-42".into()),
+            })
+            .unwrap();
+
+        assert_eq!(saved.menu_bar.parameter_ids[0], "quotaWindow:codex primary");
+        assert_eq!(
+            saved
+                .menu_bar
+                .pinned_account_id
+                .as_ref()
+                .map(AccountId::as_str),
+            Some("account-42")
+        );
+        assert_eq!(LifecycleService::new(store).unwrap().preferences(), saved);
+
+        assert!(
+            lifecycle
+                .set_menu_bar(MenuBarPreferences {
+                    parameter_ids: vec!["cpu".into(), "cpu".into()],
+                    display_limit: 2,
+                    pinned_account_id: None,
+                })
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        assert!(
+            lifecycle
+                .set_menu_bar(MenuBarPreferences {
+                    parameter_ids: vec!["secretTokens".into()],
+                    display_limit: MAX_MENU_BAR_PARAMETERS + 1,
+                    pinned_account_id: None,
+                })
+                .is_err()
+        );
     }
 }

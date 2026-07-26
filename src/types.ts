@@ -33,6 +33,13 @@ export type LifecyclePreferences = {
   theme: "system" | "light" | "dark";
   showInDock: boolean;
   launchAtLogin: boolean;
+  menuBar: MenuBarPreferences;
+};
+
+export type MenuBarPreferences = {
+  parameterIds: string[];
+  displayLimit: number;
+  pinnedAccountId: string | null;
 };
 
 export type HealthPoint = {

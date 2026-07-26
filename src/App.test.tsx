@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import { App } from "./App";
 
 let quotaResponse: unknown;
+let preferencesResponse: Record<string, unknown>;
 
 afterEach(cleanup);
 
@@ -15,7 +16,7 @@ beforeEach(() => {
   quotaResponse = {
     status: "ready",
     snapshot: {
-      account: { displayName: "user@example.com", planType: "plus" },
+      account: { id: "user@example.com", displayName: "user@example.com", planType: "plus" },
       windows: [
         {
           name: "codex · primary",
@@ -27,16 +28,22 @@ beforeEach(() => {
       updatedAt: "2026-07-26T12:00:00Z",
     },
   };
+  preferencesResponse = {
+    monitoringPaused: false,
+    locale: "zh-CN",
+    theme: "system",
+    showInDock: false,
+    launchAtLogin: false,
+    menuBar: {
+      parameterIds: ["cpu", "memoryPressure", "diskAvailable"],
+      displayLimit: 3,
+      pinnedAccountId: null,
+    },
+  };
   invoke.mockReset();
   invoke.mockImplementation((command: string) => {
     if (command === "get_lifecycle_preferences") {
-      return Promise.resolve({
-        monitoringPaused: false,
-        locale: "zh-CN",
-        theme: "system",
-        showInDock: false,
-        launchAtLogin: false,
-      });
+      return Promise.resolve(preferencesResponse);
     }
     if (command === "show_dashboard") {
       return Promise.resolve();
@@ -49,6 +56,13 @@ beforeEach(() => {
     }
     if (command === "get_quota_state") {
       return Promise.resolve(quotaResponse);
+    }
+    if (command === "refresh_quota") {
+      return Promise.resolve({
+        status: "cooldown",
+        snapshot: quotaResponse && (quotaResponse as { snapshot?: unknown }).snapshot || null,
+        retryAt: "2099-07-26T12:00:30Z",
+      });
     }
     if (command === "get_token_usage") {
       return Promise.resolve({
@@ -97,6 +111,44 @@ beforeEach(() => {
   });
 });
 
+test("configures an ordered limited menu bar and pins only real account metadata", async () => {
+  invoke.mockImplementation((command: string, args?: unknown) => {
+    if (command === "set_menu_bar_preferences") {
+      const menuBar = (args as { menuBar: unknown }).menuBar;
+      preferencesResponse = { ...preferencesResponse, menuBar };
+      return Promise.resolve(preferencesResponse);
+    }
+    if (command === "get_lifecycle_preferences") return Promise.resolve(preferencesResponse);
+    if (command === "show_dashboard") return Promise.resolve();
+    if (command === "get_application_status") return Promise.resolve({ storageIssue: null });
+    if (command === "get_system_health_history") return Promise.resolve([]);
+    if (command === "get_quota_state") return Promise.resolve(quotaResponse);
+    if (command === "get_token_usage") return Promise.resolve({ status: "loading" });
+    if (command === "get_system_health") return Promise.resolve({ status: "loading" });
+    return Promise.reject(new Error(`unexpected command ${command}`));
+  });
+  render(<App />);
+
+  expect(await screen.findByRole("group", { name: "菜单栏参数" })).toBeVisible();
+  expect(screen.getByRole("option", { name: /user@example.com/ })).toHaveValue("user@example.com");
+  fireEvent.click(screen.getByRole("checkbox", { name: "codex · primary" }));
+  await waitFor(() => expect(screen.getByRole("checkbox", { name: "codex · primary" })).toBeChecked());
+  fireEvent.click(screen.getByRole("button", { name: "上移 codex · primary" }));
+  await waitFor(() => expect(screen.getByLabelText("第 3 位")).toHaveTextContent("3"));
+  fireEvent.change(screen.getByLabelText("最多显示数量"), { target: { value: "2" } });
+  await waitFor(() => expect(screen.getByLabelText("最多显示数量")).toHaveValue("2"));
+  fireEvent.change(screen.getByLabelText("置顶账户"), { target: { value: "user@example.com" } });
+
+  await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("set_menu_bar_preferences", {
+    menuBar: {
+      parameterIds: ["cpu", "memoryPressure", "quotaWindow:codex · primary", "diskAvailable"],
+      displayLimit: 2,
+      pinnedAccountId: "user@example.com",
+    },
+  }));
+  expect(screen.getByText(/键盘操作/)).toBeVisible();
+});
+
 test("gives storage-specific recovery instead of blaming Codex authentication", async () => {
   quotaResponse = { status: "error", reason: "storage", lastSnapshot: null };
 
@@ -110,7 +162,7 @@ test("shows a textual loading state before rendering understandable system metri
   render(<App />);
 
   expect(screen.getByText("正在读取系统状态…")).toBeVisible();
-  expect(await screen.findByText("处理器")).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "处理器" })).toBeVisible();
   expect(screen.getByText("12.5%")).toBeVisible();
   expect(screen.getByText("正常")).toBeVisible();
   expect(screen.getByText("Codex 额度")).toBeVisible();
@@ -198,4 +250,20 @@ test("shows manual refresh cooldown as disabled feedback", async () => {
 
   expect(await screen.findByText("刷新冷却中")).toBeVisible();
   expect(screen.getByRole("button", { name: /后可刷新/ })).toBeDisabled();
+});
+
+test("manual refresh announces cooldown and English settings retain accessible names", async () => {
+  preferencesResponse = {
+    ...preferencesResponse,
+    locale: "en",
+  };
+  render(<App />);
+
+  const refresh = await screen.findByRole("button", { name: "Refresh quota" });
+  fireEvent.click(refresh);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_quota"));
+  expect(await screen.findByText("Refresh cooling down")).toBeVisible();
+  expect(screen.getByRole("group", { name: "Menu bar parameters" })).toBeVisible();
+  expect(screen.getByLabelText("Pinned account")).toBeEnabled();
+  expect(screen.getByText(/VoiceOver reads order controls/)).toBeVisible();
 });

@@ -20,6 +20,11 @@ const defaultPreferences: LifecyclePreferences = {
   theme: "system",
   showInDock: false,
   launchAtLogin: false,
+  menuBar: {
+    parameterIds: ["cpu", "memoryPressure", "diskAvailable"],
+    displayLimit: 3,
+    pinnedAccountId: null,
+  },
 };
 
 function errorMessage(error: unknown) {
@@ -348,6 +353,10 @@ export function App() {
     return applyPreferenceMutation(monitorApi.setLocale(locale));
   }
 
+  function updateMenuBar(menuBar: LifecyclePreferences["menuBar"]) {
+    return applyPreferenceMutation(monitorApi.setMenuBar(menuBar));
+  }
+
   const healthView = toHealthView(health, preferences.monitoringPaused);
   const shownMetrics = healthView.metrics;
   const hasMetrics = shownMetrics && shownMetrics.memoryTotalBytes > 0 && shownMetrics.diskTotalBytes > 0;
@@ -371,6 +380,34 @@ export function App() {
             : quotaView.error === "invalidResponse"
               ? t("quotaCompatibilityRecovery")
               : t("quotaRecovery");
+  const menuBarOptions = [
+    { id: "cpu", label: t("cpu") },
+    { id: "memoryPressure", label: t("memory") },
+    { id: "diskAvailable", label: t("disk") },
+    { id: "networkDown", label: t("network") },
+    { id: "battery", label: t("battery") },
+    { id: "uptime", label: t("uptime") },
+    ...(quotaSnapshot?.windows.map((window) => ({ id: `quotaWindow:${window.name}`, label: window.name })) ?? []),
+  ];
+  const optionLabels = new Map(menuBarOptions.map((option) => [option.id, option.label]));
+  const pinnedAccountUnavailable = preferences.menuBar.pinnedAccountId != null
+    && preferences.menuBar.pinnedAccountId !== quotaSnapshot?.account.id;
+
+  function toggleMenuBarParameter(id: string, selected: boolean) {
+    const parameterIds = selected
+      ? [...preferences.menuBar.parameterIds, id]
+      : preferences.menuBar.parameterIds.filter((current) => current !== id);
+    return updateMenuBar({ ...preferences.menuBar, parameterIds });
+  }
+
+  function moveMenuBarParameter(id: string, direction: -1 | 1) {
+    const parameterIds = [...preferences.menuBar.parameterIds];
+    const from = parameterIds.indexOf(id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= parameterIds.length) return;
+    [parameterIds[from], parameterIds[to]] = [parameterIds[to], parameterIds[from]];
+    return updateMenuBar({ ...preferences.menuBar, parameterIds });
+  }
 
   return (
     <div className="app-shell">
@@ -469,6 +506,63 @@ export function App() {
               <option value="dark">{t("dark")}</option>
             </select>
           </label>
+        </section>
+
+        <section className="menu-bar-settings" aria-labelledby="menu-bar-heading">
+          <div>
+            <p className="eyebrow">{t("menuBarEyebrow")}</p>
+            <h2 id="menu-bar-heading">{t("menuBarTitle")}</h2>
+            <p>{t("menuBarHelp")}</p>
+          </div>
+          <div className="menu-bar-controls">
+            <label>{t("pinnedAccount")}
+              <select
+                value={preferences.menuBar.pinnedAccountId ?? ""}
+                onChange={(event) => void updateMenuBar({
+                  ...preferences.menuBar,
+                  pinnedAccountId: event.target.value || null,
+                })}
+              >
+                <option value="">{t("currentAccountFallback")}</option>
+                {quotaSnapshot && <option value={quotaSnapshot.account.id}>{quotaSnapshot.account.displayName} · {quotaSnapshot.account.planType}</option>}
+              </select>
+            </label>
+            <label>{t("menuBarLimit")}
+              <select
+                value={preferences.menuBar.displayLimit}
+                onChange={(event) => void updateMenuBar({ ...preferences.menuBar, displayLimit: Number(event.target.value) })}
+              >
+                {[1, 2, 3, 4, 5].map((limit) => <option value={limit} key={limit}>{limit}</option>)}
+              </select>
+            </label>
+          </div>
+          {pinnedAccountUnavailable && <div className="error-banner" role="status"><div><strong>{t("pinnedUnavailable")}</strong><span>{t("pinnedUnavailableHelp")}</span></div></div>}
+          <fieldset className="menu-bar-parameters">
+            <legend>{t("menuBarParameters")}</legend>
+            {menuBarOptions.map((option) => {
+              const index = preferences.menuBar.parameterIds.indexOf(option.id);
+              const selected = index >= 0;
+              return <div className="menu-bar-parameter" key={option.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={(event) => void toggleMenuBarParameter(option.id, event.target.checked)}
+                  />
+                  <span>{option.label}</span>
+                </label>
+                {selected && <div className="order-buttons">
+                  <span aria-label={t("menuBarPosition", { position: String(index + 1) })}>{index + 1}</span>
+                  <button type="button" disabled={index === 0} aria-label={t("moveUp", { parameter: option.label })} onClick={() => void moveMenuBarParameter(option.id, -1)}>↑</button>
+                  <button type="button" disabled={index === preferences.menuBar.parameterIds.length - 1} aria-label={t("moveDown", { parameter: option.label })} onClick={() => void moveMenuBarParameter(option.id, 1)}>↓</button>
+                </div>}
+              </div>;
+            })}
+          </fieldset>
+          <p className="accessibility-note" role="note">{t("menuBarKeyboardHelp")}</p>
+          {preferences.menuBar.parameterIds.length > 0 && <ol className="menu-bar-preview" aria-label={t("menuBarOrder") }>
+            {preferences.menuBar.parameterIds.map((id) => <li key={id}>{optionLabels.get(id) ?? id.replace("quotaWindow:", "")}</li>)}
+          </ol>}
         </section>
       </main>
     </div>

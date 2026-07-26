@@ -257,6 +257,30 @@ mod tests {
     }
 
     #[test]
+    fn preferences_saved_before_menu_bar_configuration_receive_safe_defaults() {
+        let database = Database::in_memory().unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO app_preferences (id, value_json, updated_at_utc) VALUES (1, ?1, ?2)",
+                params![
+                    r#"{"monitoringPaused":false,"locale":"zh-CN","theme":"system","showInDock":false,"launchAtLogin":false}"#,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+
+        let loaded = PreferenceStore::load(&database).unwrap().unwrap();
+
+        assert_eq!(
+            loaded.menu_bar,
+            crate::lifecycle::MenuBarPreferences::default()
+        );
+    }
+
+    #[test]
     fn latest_quota_snapshot_survives_service_recreation() {
         let database = Database::in_memory().unwrap();
         let snapshot = QuotaSnapshot {
