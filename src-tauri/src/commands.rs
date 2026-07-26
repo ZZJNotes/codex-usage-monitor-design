@@ -3,12 +3,12 @@ use tauri::{AppHandle, State};
 
 use crate::{
     AppState, ApplicationStatus,
-    lifecycle::LifecyclePreferences,
+    lifecycle::{LifecyclePreferences, MenuBarPreferences},
     quota::{QuotaService, QuotaState},
     set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     token_usage::{TokenUsageFilters, TokenUsageState},
-    tray::{TrayMenuItems, update_tray_locale, update_tray_text},
+    tray::{TrayMenuItems, update_tray},
 };
 
 #[tauri::command]
@@ -63,19 +63,31 @@ fn visible_quota_state(paused: bool, quota: &QuotaService) -> QuotaState {
 }
 
 #[tauri::command]
-pub(crate) fn refresh_quota(state: State<'_, AppState>) -> QuotaState {
-    refresh_quota_service(
+pub(crate) fn refresh_quota(
+    state: State<'_, AppState>,
+    tray: State<'_, TrayMenuItems>,
+    app: AppHandle,
+) -> QuotaState {
+    let result = refresh_quota_service(
         state.lifecycle.preferences().monitoring_paused,
         &state.quota,
-    )
+    );
+    update_tray(&app, &tray);
+    result
 }
 
 #[tauri::command]
-pub(crate) fn recover_quota(state: State<'_, AppState>) -> QuotaState {
-    recover_quota_service(
+pub(crate) fn recover_quota(
+    state: State<'_, AppState>,
+    tray: State<'_, TrayMenuItems>,
+    app: AppHandle,
+) -> QuotaState {
+    let result = recover_quota_service(
         state.lifecycle.preferences().monitoring_paused,
         &state.quota,
-    )
+    );
+    update_tray(&app, &tray);
+    result
 }
 
 fn refresh_quota_service(paused: bool, quota: &QuotaService) -> QuotaState {
@@ -151,10 +163,11 @@ pub(crate) fn set_monitoring_paused(
     paused: bool,
     state: State<'_, AppState>,
     tray: State<'_, TrayMenuItems>,
+    app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let preferences =
         set_monitoring_paused_with_account_evidence(&state.lifecycle, &state.quota, paused)?;
-    update_tray_text(&tray, preferences.locale, preferences.monitoring_paused);
+    update_tray(&app, &tray);
     Ok(preferences)
 }
 
@@ -174,12 +187,19 @@ pub(crate) fn set_locale(
     app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let preferences = state.lifecycle.set_locale(&locale)?;
-    update_tray_locale(
-        &app,
-        &tray,
-        preferences.locale,
-        preferences.monitoring_paused,
-    );
+    update_tray(&app, &tray);
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub(crate) fn set_menu_bar_preferences(
+    menu_bar: MenuBarPreferences,
+    state: State<'_, AppState>,
+    tray: State<'_, TrayMenuItems>,
+    app: AppHandle,
+) -> Result<LifecyclePreferences, String> {
+    let preferences = state.lifecycle.set_menu_bar(menu_bar)?;
+    update_tray(&app, &tray);
     Ok(preferences)
 }
 

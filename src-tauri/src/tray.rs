@@ -6,113 +6,152 @@ use tauri::{
 };
 
 use crate::{
-    AppState, lifecycle::Locale, set_monitoring_paused_with_account_evidence, show_main_window,
+    AppState,
+    lifecycle::LifecyclePreferences,
+    set_monitoring_paused_with_account_evidence, show_main_window,
+    tray_view::{build_tray_view, pinned_quota_available, tray_copy},
 };
 
 pub(crate) struct TrayMenuItems {
+    status: MenuItem<tauri::Wry>,
+    updated: MenuItem<tauri::Wry>,
+    reset: MenuItem<tauri::Wry>,
+    refresh: MenuItem<tauri::Wry>,
     open: MenuItem<tauri::Wry>,
     pause: MenuItem<tauri::Wry>,
     quit: MenuItem<tauri::Wry>,
 }
 
-fn tray_text(
-    locale: Locale,
+fn actions(
+    preferences: &LifecyclePreferences,
     paused: bool,
+    pinned: bool,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
-    match (locale, paused) {
-        (Locale::ZhCn, false) => ("打开仪表盘", "暂停监控", "退出", "Codex 用量监控"),
-        (Locale::ZhCn, true) => ("打开仪表盘", "恢复监控", "退出", "Codex 用量监控"),
-        (Locale::En, false) => (
-            "Open dashboard",
-            "Pause monitoring",
-            "Quit",
-            "Codex Usage Monitor",
-        ),
-        (Locale::En, true) => (
-            "Open dashboard",
-            "Resume monitoring",
-            "Quit",
-            "Codex Usage Monitor",
-        ),
-    }
+    let copy = tray_copy(preferences.locale);
+    let refresh = if paused {
+        copy.refresh_generic
+    } else if pinned {
+        copy.refresh_pinned
+    } else {
+        copy.refresh_current
+    };
+    (
+        refresh,
+        copy.open,
+        if paused { copy.resume } else { copy.pause },
+        copy.quit,
+    )
 }
 
-pub(crate) fn update_tray_text(items: &TrayMenuItems, locale: Locale, paused: bool) {
-    let (open, pause, quit, _) = tray_text(locale, paused);
+fn os_locale() -> String {
+    sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string())
+}
+
+pub(crate) fn update_tray(app: &AppHandle, items: &TrayMenuItems) {
+    let state = app.state::<AppState>();
+    let preferences = state.lifecycle.preferences();
+    let health = state.health.latest();
+    let quota = state.quota.latest();
+    let view = build_tray_view(&preferences, &health, &quota, &os_locale());
+    let pinned = preferences.menu_bar.pinned_account_id.is_some();
+    let (refresh, open, pause, quit) = actions(&preferences, preferences.monitoring_paused, pinned);
+    let _ = items.status.set_text(&view.status);
+    let _ = items.updated.set_text(&view.updated);
+    let _ = items.reset.set_text(&view.reset);
+    let _ = items.refresh.set_text(refresh);
+    let _ = items.refresh.set_enabled(
+        !preferences.monitoring_paused && pinned_quota_available(&preferences, &quota),
+    );
     let _ = items.open.set_text(open);
     let _ = items.pause.set_text(pause);
     let _ = items.quit.set_text(quit);
-}
-
-pub(crate) fn update_tray_locale(
-    app: &AppHandle,
-    items: &TrayMenuItems,
-    locale: Locale,
-    paused: bool,
-) {
-    update_tray_text(items, locale, paused);
-    let (_, _, _, tooltip) = tray_text(locale, paused);
     if let Some(tray_icon) = app.tray_by_id("main-tray") {
-        let _ = tray_icon.set_tooltip(Some(tooltip));
+        let _ = tray_icon.set_title(Some(&view.title));
+        let _ = tray_icon.set_tooltip(Some(tray_copy(preferences.locale).tooltip));
     }
 }
 
 pub(crate) fn setup_tray(
     app: &AppHandle,
-    locale: Locale,
-    paused: bool,
+    preferences: &LifecyclePreferences,
 ) -> tauri::Result<TrayMenuItems> {
-    let (open_text, pause_text, quit_text, tooltip) = tray_text(locale, paused);
-    let open = MenuItem::with_id(app, "open", open_text, true, None::<&str>)?;
+    let view = build_tray_view(
+        preferences,
+        &crate::system_health::SystemHealthState::Loading,
+        &crate::quota::QuotaState::Loading,
+        &os_locale(),
+    );
+    let pinned = preferences.menu_bar.pinned_account_id.is_some();
+    let (refresh_text, open_text, pause_text, quit_text) =
+        actions(preferences, preferences.monitoring_paused, pinned);
+    let status = MenuItem::with_id(app, "summary-status", view.status, false, None::<&str>)?;
+    let updated = MenuItem::with_id(app, "summary-updated", view.updated, false, None::<&str>)?;
+    let reset = MenuItem::with_id(app, "summary-reset", view.reset, false, None::<&str>)?;
+    let refresh = MenuItem::with_id(
+        app,
+        "refresh-quota",
+        refresh_text,
+        !preferences.monitoring_paused && !pinned,
+        Some("CmdOrCtrl+R"),
+    )?;
+    let open = MenuItem::with_id(app, "open", open_text, true, Some("CmdOrCtrl+D"))?;
     let pause = MenuItem::with_id(app, "toggle-pause", pause_text, true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", quit_text, true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &pause, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &status, &updated, &reset, &separator, &refresh, &open, &pause, &separator, &quit,
+        ],
+    )?;
     let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(icon)
         .icon_as_template(false)
-        .tooltip(tooltip)
+        .title(&view.title)
+        .tooltip(tray_copy(preferences.locale).tooltip)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "refresh-quota" => {
+                let state = app.state::<AppState>();
+                let preferences = state.lifecycle.preferences();
+                if !preferences.monitoring_paused
+                    && pinned_quota_available(&preferences, &state.quota.latest())
+                {
+                    let _ = state.quota.manual_refresh();
+                }
+                let tray = app.state::<TrayMenuItems>();
+                update_tray(app, &tray);
+            }
             "open" => {
                 let _ = show_main_window(app);
             }
             "toggle-pause" => {
                 let state = app.state::<AppState>();
                 let paused = !state.lifecycle.preferences().monitoring_paused;
-                if let Ok(preferences) = set_monitoring_paused_with_account_evidence(
+                if set_monitoring_paused_with_account_evidence(
                     &state.lifecycle,
                     &state.quota,
                     paused,
-                ) {
+                )
+                .is_ok()
+                {
                     let tray = app.state::<TrayMenuItems>();
-                    update_tray_text(&tray, preferences.locale, preferences.monitoring_paused);
+                    update_tray(app, &tray);
                 }
             }
             "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
-    Ok(TrayMenuItems { open, pause, quit })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tray_actions_follow_the_saved_locale_and_pause_state() {
-        assert_eq!(
-            tray_text(Locale::En, true),
-            (
-                "Open dashboard",
-                "Resume monitoring",
-                "Quit",
-                "Codex Usage Monitor"
-            )
-        );
-        assert_eq!(tray_text(Locale::ZhCn, false).1, "暂停监控");
-    }
+    Ok(TrayMenuItems {
+        status,
+        updated,
+        reset,
+        refresh,
+        open,
+        pause,
+        quit,
+    })
 }

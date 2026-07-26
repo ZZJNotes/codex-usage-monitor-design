@@ -4,6 +4,7 @@ import type {
   HealthPoint,
   HealthState,
   LifecyclePreferences,
+  MenuBarPreferences,
   QuotaState,
   TokenUsageFilters,
   TokenUsageState,
@@ -34,4 +35,6 @@ export const monitorApi = {
     invoke<LifecyclePreferences>("set_theme", { theme }),
   setLocale: (locale: LifecyclePreferences["locale"]) =>
     invoke<LifecyclePreferences>("set_locale", { locale }),
+  setMenuBar: (menuBar: MenuBarPreferences) =>
+    invoke<LifecyclePreferences>("set_menu_bar_preferences", { menuBar }),
 };

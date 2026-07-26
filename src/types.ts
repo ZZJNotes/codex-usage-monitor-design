@@ -33,7 +33,23 @@ export type LifecyclePreferences = {
   theme: "system" | "light" | "dark";
   showInDock: boolean;
   launchAtLogin: boolean;
+  menuBar: MenuBarPreferences;
 };
+
+export type MenuBarPreferences = {
+  parameterIds: MenuBarParameterId[];
+  displayLimit: number;
+  pinnedAccountId: string | null;
+};
+
+export type MenuBarParameterId =
+  | "cpu"
+  | "memoryPressure"
+  | "diskAvailable"
+  | "networkDown"
+  | "battery"
+  | "uptime"
+  | `quotaWindow:${string}`;
 
 export type HealthPoint = {
   observedAt: string;
