@@ -5,6 +5,7 @@
 ## 当前能力和边界
 
 - Rust 每 2 秒采集 CPU、macOS 内存压力、根磁盘、网络吞吐、电池和运行时长；只持久化分钟/小时聚合。
+- 点击菜单栏图标可打开监控弹窗，汇总额度与系统指标；弹窗失去焦点时自动隐藏，并可直接刷新额度、暂停监控、打开仪表盘或退出。
 - 通过本机 Codex `app-server --stdio` 只读请求 `account/read` 和 `account/rateLimits/read`，显示动态命名额度窗口、剩余百分比、重置时间及 stale/error 状态。
 - 流式读取 `$CODEX_HOME/sessions`、`$CODEX_HOME/archived_sessions`（未设置时为 `~/.codex/...`）中的 JSONL，只提取 Token 数值、模型和不透明会话标识；支持增量、归档、截断恢复、幂等导入和手工归属修正。
 - 支持暂停、保留期、清理历史、账户范围历史删除，以及无凭据的 CSV/JSON 导出。

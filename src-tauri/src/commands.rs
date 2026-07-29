@@ -13,7 +13,7 @@ use crate::{
     set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     token_usage::{TokenUsageFilters, TokenUsageService, TokenUsageState},
-    tray::{TrayMenuItems, update_tray},
+    tray::update_tray_title,
 };
 
 pub(crate) struct NotificationIpcState {
@@ -75,28 +75,26 @@ fn visible_quota_state(paused: bool, quota: &QuotaService) -> QuotaState {
 #[tauri::command]
 pub(crate) fn refresh_quota(
     state: State<'_, AppState>,
-    tray: State<'_, TrayMenuItems>,
     app: AppHandle,
 ) -> QuotaState {
     let result = refresh_quota_service(
         state.lifecycle.preferences().monitoring_paused,
         &state.quota,
     );
-    update_tray(&app, &tray);
+    update_tray_title(&app);
     result
 }
 
 #[tauri::command]
 pub(crate) fn recover_quota(
     state: State<'_, AppState>,
-    tray: State<'_, TrayMenuItems>,
     app: AppHandle,
 ) -> QuotaState {
     let result = recover_quota_service(
         state.lifecycle.preferences().monitoring_paused,
         &state.quota,
     );
-    update_tray(&app, &tray);
+    update_tray_title(&app);
     result
 }
 
@@ -191,12 +189,11 @@ pub(crate) fn get_notification_status(
 pub(crate) fn set_monitoring_paused(
     paused: bool,
     state: State<'_, AppState>,
-    tray: State<'_, TrayMenuItems>,
     app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let preferences =
         set_monitoring_paused_with_account_evidence(&state.lifecycle, &state.quota, paused)?;
-    update_tray(&app, &tray);
+    update_tray_title(&app);
     Ok(preferences)
 }
 
@@ -348,11 +345,10 @@ pub(crate) fn request_credential_deletion(
 pub(crate) fn set_locale(
     locale: String,
     state: State<'_, AppState>,
-    tray: State<'_, TrayMenuItems>,
     app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let preferences = state.lifecycle.set_locale(&locale)?;
-    update_tray(&app, &tray);
+    update_tray_title(&app);
     Ok(preferences)
 }
 
@@ -360,11 +356,10 @@ pub(crate) fn set_locale(
 pub(crate) fn set_menu_bar_preferences(
     menu_bar: MenuBarPreferences,
     state: State<'_, AppState>,
-    tray: State<'_, TrayMenuItems>,
     app: AppHandle,
 ) -> Result<LifecyclePreferences, String> {
     let preferences = state.lifecycle.set_menu_bar(menu_bar)?;
-    update_tray(&app, &tray);
+    update_tray_title(&app);
     Ok(preferences)
 }
 
@@ -379,6 +374,11 @@ pub(crate) fn set_notification_preferences(
 #[tauri::command]
 pub(crate) fn show_dashboard(app: AppHandle) -> Result<(), String> {
     show_main_window(&app)
+}
+
+#[tauri::command]
+pub(crate) fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[cfg(test)]

@@ -335,6 +335,21 @@ test("shows exact token semantics and accessible time model session query contro
   }));
 });
 
+test("uses the full dashboard width and exposes truthful ChatGPT login guidance", async () => {
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Codex 额度" })).toBeVisible();
+  expect(screen.queryByRole("complementary", { name: "Codex 用量监控" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "登录 ChatGPT" }));
+  expect(screen.getByRole("dialog", { name: "登录 ChatGPT" })).toBeVisible();
+  expect(screen.getByText(/codex login/)).toBeVisible();
+  expect(screen.getByText(/不会在本应用中保存账户密码或 OAuth 凭据/)).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "知道了" }));
+  expect(screen.queryByRole("dialog", { name: "登录 ChatGPT" })).not.toBeInTheDocument();
+});
+
 test("keeps the last quota visible and explains transport staleness without showing zero", async () => {
   quotaResponse = {
     status: "stale",

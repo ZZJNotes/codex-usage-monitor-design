@@ -25,10 +25,11 @@ use commands::{
     cleanup_expired_history, clear_history, delete_account_history, export_statistics,
     get_application_status, get_credential_deletion_status, get_lifecycle_preferences,
     get_notification_status, get_quota_state, get_system_health, get_system_health_history,
-    get_token_usage, reassign_token_session, recover_quota, refresh_quota, refresh_system_health,
-    refresh_token_usage, request_credential_deletion, set_dock_visibility, set_launch_at_login,
-    set_locale, set_menu_bar_preferences, set_monitoring_paused, set_notification_preferences,
-    set_retention_days, set_theme, show_dashboard, sync_dock_visibility, sync_launch_at_login,
+    get_token_usage, quit_app, reassign_token_session, recover_quota, refresh_quota,
+    refresh_system_health, refresh_token_usage, request_credential_deletion, set_dock_visibility,
+    set_launch_at_login, set_locale, set_menu_bar_preferences, set_monitoring_paused,
+    set_notification_preferences, set_retention_days, set_theme, show_dashboard,
+    sync_dock_visibility, sync_launch_at_login,
 };
 use database::Database;
 use governance::DataGovernanceService;
@@ -41,7 +42,7 @@ use serde::Serialize;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{AppHandle, Manager, Runtime, WindowEvent};
 use token_usage::{AccountEvidenceSource, ActiveAccountEvidence, TokenAccount, TokenUsageService};
-use tray::{TrayMenuItems, setup_tray, update_tray};
+use tray::{setup_tray, update_tray_title};
 
 pub(crate) struct AppState {
     pub(crate) health: Arc<SystemHealthService>,
@@ -251,6 +252,7 @@ pub fn run() {
             set_menu_bar_preferences,
             set_notification_preferences,
             show_dashboard,
+            quit_app,
             set_retention_days,
             cleanup_expired_history,
             clear_history,
@@ -327,14 +329,11 @@ pub fn run() {
             let preferences = lifecycle.preferences();
             sync_launch_at_login(app.handle(), preferences.launch_at_login)
                 .map_err(std::io::Error::other)?;
-            app.manage(setup_tray(app.handle(), &preferences)?);
+            app.manage(setup_tray(app.handle())?);
             let tray_app = app.handle().clone();
-            thread::spawn(move || {
-                loop {
-                    thread::sleep(Duration::from_secs(1));
-                    let tray = tray_app.state::<TrayMenuItems>();
-                    update_tray(&tray_app, &tray);
-                }
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(1));
+                update_tray_title(&tray_app);
             });
 
             sync_dock_visibility(app.handle(), preferences.show_in_dock)
@@ -460,8 +459,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            if window.label() == "main"
+                && let WindowEvent::CloseRequested { api, .. } = event
+            {
                 api.prevent_close();
+                let _ = window.hide();
+            } else if window.label() == "popover" && matches!(event, WindowEvent::Focused(false)) {
                 let _ = window.hide();
             }
         })

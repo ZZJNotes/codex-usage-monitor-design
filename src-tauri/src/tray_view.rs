@@ -6,6 +6,7 @@ use crate::{
     system_health::{SystemHealthMetrics, SystemHealthState},
 };
 
+#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub(crate) struct TrayView {
     pub(crate) title: String,
@@ -24,14 +25,6 @@ pub(crate) struct TrayCopy {
     pub(crate) quit: &'static str,
     pub(crate) tooltip: &'static str,
     default_title: &'static str,
-    memory: &'static str,
-    disk: &'static str,
-    battery: &'static str,
-    uptime: &'static str,
-    left: &'static str,
-    pressure_normal: &'static str,
-    pressure_warning: &'static str,
-    pressure_critical: &'static str,
     system_paused: &'static str,
     system_loading: &'static str,
     system_fresh: &'static str,
@@ -67,14 +60,6 @@ pub(crate) fn tray_copy(locale: Locale) -> TrayCopy {
             quit: "退出",
             tooltip: "Codex 用量监控",
             default_title: "Codex 用量",
-            memory: "内存",
-            disk: "磁盘",
-            battery: "电量",
-            uptime: "运行",
-            left: "剩余",
-            pressure_normal: "正常",
-            pressure_warning: "偏高",
-            pressure_critical: "严重",
             system_paused: "系统已暂停",
             system_loading: "系统读取中",
             system_fresh: "系统正常",
@@ -107,14 +92,6 @@ pub(crate) fn tray_copy(locale: Locale) -> TrayCopy {
             quit: "Quit",
             tooltip: "Codex Usage Monitor",
             default_title: "Codex usage",
-            memory: "Memory",
-            disk: "Disk",
-            battery: "Battery",
-            uptime: "Up",
-            left: "left",
-            pressure_normal: "normal",
-            pressure_warning: "high",
-            pressure_critical: "critical",
             system_paused: "system paused",
             system_loading: "system loading",
             system_fresh: "system fresh",
@@ -140,6 +117,7 @@ pub(crate) fn tray_copy(locale: Locale) -> TrayCopy {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn pinned_quota_available(
     preferences: &LifecyclePreferences,
     quota: &QuotaState,
@@ -213,63 +191,45 @@ fn format_time(time: DateTime<Utc>, os_locale: &str) -> String {
     }
 }
 
-fn parameter_text(
+fn parameter_compact(
     parameter: &MenuBarParameter,
-    copy: &TrayCopy,
     os_locale: &str,
     metrics: Option<&SystemHealthMetrics>,
     snapshot: Option<&QuotaSnapshot>,
 ) -> Option<String> {
     match parameter {
         MenuBarParameter::Cpu => metrics.map(|m| {
-            format!(
-                "CPU {}%",
-                format_number(f64::from(m.cpu_percent), 0, os_locale)
-            )
+            format!("C{}%", format_number(f64::from(m.cpu_percent), 0, os_locale))
         }),
         MenuBarParameter::MemoryPressure => metrics.map(|m| {
-            let state = match m.memory_pressure.as_str() {
-                "normal" => copy.pressure_normal,
-                "warning" => copy.pressure_warning,
-                _ => copy.pressure_critical,
+            let percent = if m.memory_total_bytes == 0 {
+                0.0
+            } else {
+                m.memory_used_bytes as f64 / m.memory_total_bytes as f64 * 100.0
             };
-            format!("{} {state}", copy.memory)
+            format!("M{}%", format_number(percent, 0, os_locale))
         }),
         MenuBarParameter::DiskAvailable => metrics.map(|m| {
-            format!(
-                "{} {} GB",
-                copy.disk,
-                format_number(
-                    m.disk_available_bytes as f64 / 1_000_000_000.0,
-                    0,
-                    os_locale
-                )
-            )
+            let percent = if m.disk_total_bytes == 0 {
+                0.0
+            } else {
+                m.disk_available_bytes as f64 / m.disk_total_bytes as f64 * 100.0
+            };
+            format!("D{}%", format_number(percent, 0, os_locale))
         }),
         MenuBarParameter::NetworkDown => metrics.map(|m| {
             format!(
-                "↓ {} MB/s",
+                "N{}M",
                 format_number(m.network_down_bytes_per_second / 1_000_000.0, 1, os_locale)
             )
         }),
-        MenuBarParameter::Battery => metrics.and_then(|m| m.battery_percent).map(|value| {
-            format!(
-                "{} {}%",
-                copy.battery,
-                format_number(f64::from(value), 0, os_locale)
-            )
-        }),
-        MenuBarParameter::Uptime => {
-            metrics.map(|m| format!("{} {} h", copy.uptime, m.uptime_seconds / 3_600))
-        }
+        MenuBarParameter::Battery => metrics
+            .and_then(|m| m.battery_percent)
+            .map(|value| format!("B{}%", format_number(f64::from(value), 0, os_locale))),
+        MenuBarParameter::Uptime => metrics.map(|m| format!("U{}H", m.uptime_seconds / 3_600)),
         MenuBarParameter::QuotaWindow(name) => snapshot
             .and_then(|snapshot| snapshot.windows.iter().find(|window| window.name == *name))
-            .map(|window| {
-                format!(
-                    "{} {}% {}",
-                    window.name, window.remaining_percent, copy.left
-                )
-            }),
+            .map(|window| format!("Q{}%", window.remaining_percent)),
     }
 }
 
@@ -415,17 +375,11 @@ pub(crate) fn build_tray_view(
     let title = selected
         .iter()
         .filter_map(|parameter| {
-            parameter_text(
-                parameter,
-                &copy,
-                os_locale,
-                current_metrics(health),
-                snapshot,
-            )
+            parameter_compact(parameter, os_locale, current_metrics(health), snapshot)
         })
         .take(preferences.menu_bar.display_limit.into())
         .collect::<Vec<_>>()
-        .join(" · ");
+        .join(" ");
     let mut statuses = Vec::new();
     let mut system_time = None;
     let mut quota_time = None;
@@ -518,7 +472,7 @@ mod tests {
             next_refresh_at: Utc::now(),
         };
         let view = build_tray_view(&preferences, &health(), &quota, "de-DE");
-        assert_eq!(view.title, "5 hours 72% left · ↓ 1,5 MB/s");
+        assert_eq!(view.title, "Q72% N1,5M");
         assert_eq!(view.status, "Status: system fresh; quota fresh");
         assert!(view.reset.starts_with("Quota reset: 5 hours "));
         assert!(!view.reset.contains("UTC"));
@@ -533,6 +487,7 @@ mod tests {
             retry_at: None,
         };
         let view = build_tray_view(&LifecyclePreferences::default(), &health(), &quota, "zh-CN");
+        assert_eq!(view.title, "C12% M50% D42%");
         assert_eq!(view.status, "状态：系统正常");
         assert!(view.updated.starts_with("系统更新"));
         assert!(!view.updated.contains("额度"));
@@ -556,7 +511,7 @@ mod tests {
             next_refresh_at: Utc::now(),
         };
         let view = build_tray_view(&preferences, &health(), &quota, "zh-CN");
-        assert_eq!(view.title, "CPU 12%");
+        assert_eq!(view.title, "C12%");
         assert_eq!(view.status, "状态：系统正常；置顶账户不可用");
         assert!(!pinned_quota_available(&preferences, &quota));
     }
@@ -604,7 +559,7 @@ mod tests {
 
         let view = build_tray_view(&preferences, &health(), &quota, "en-US");
 
-        assert_eq!(view.title, "CPU 12% · ↓ 1.5 MB/s");
+        assert_eq!(view.title, "C12% N1.5M");
         assert!(view.reset.contains("retired unavailable"));
     }
 }

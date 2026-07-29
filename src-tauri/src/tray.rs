@@ -1,157 +1,103 @@
 use tauri::{
-    AppHandle, Manager,
-    image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    AppHandle, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::{
-    AppState,
-    lifecycle::LifecyclePreferences,
-    set_monitoring_paused_with_account_evidence, show_main_window,
-    tray_view::{build_tray_view, pinned_quota_available, tray_copy},
-};
+use crate::tray_view::build_tray_view;
 
-pub(crate) struct TrayMenuItems {
-    status: MenuItem<tauri::Wry>,
-    updated: MenuItem<tauri::Wry>,
-    reset: MenuItem<tauri::Wry>,
-    refresh: MenuItem<tauri::Wry>,
-    open: MenuItem<tauri::Wry>,
-    pause: MenuItem<tauri::Wry>,
-    quit: MenuItem<tauri::Wry>,
-}
-
-fn actions(
-    preferences: &LifecyclePreferences,
-    paused: bool,
-    pinned: bool,
-) -> (&'static str, &'static str, &'static str, &'static str) {
-    let copy = tray_copy(preferences.locale);
-    let refresh = if paused {
-        copy.refresh_generic
-    } else if pinned {
-        copy.refresh_pinned
-    } else {
-        copy.refresh_current
-    };
-    (
-        refresh,
-        copy.open,
-        if paused { copy.resume } else { copy.pause },
-        copy.quit,
-    )
-}
-
-fn os_locale() -> String {
+pub(crate) fn os_locale() -> String {
     sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string())
 }
 
-pub(crate) fn update_tray(app: &AppHandle, items: &TrayMenuItems) {
-    let state = app.state::<AppState>();
+fn should_toggle_popover(button: MouseButton, button_state: MouseButtonState) -> bool {
+    button == MouseButton::Left && button_state == MouseButtonState::Up
+}
+
+fn popover_position(icon_rect: Rect, popover_width: u32) -> PhysicalPosition<i32> {
+    let icon_position = icon_rect.position.to_physical::<f64>(1.0);
+    let icon_size = icon_rect.size.to_physical::<f64>(1.0);
+    let x = icon_position.x + (icon_size.width - f64::from(popover_width)) / 2.0;
+    let y = icon_position.y + icon_size.height;
+    PhysicalPosition::new(x.round() as i32, y.round() as i32)
+}
+
+pub(crate) fn toggle_popover(app: &AppHandle, icon_rect: Rect) {
+    if let Some(window) = app.get_webview_window("popover") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            if let Ok(size) = window.outer_size() {
+                let _ = window.set_position(popover_position(icon_rect, size.width));
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+pub(crate) fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    // Create popover window upfront (hidden) so it's ready when the user clicks
+    WebviewWindowBuilder::new(app, "popover", WebviewUrl::App("index.html#popover".into()))
+        .title("")
+        .inner_size(420.0, 520.0)
+        .decorations(false)
+        .always_on_top(true)
+        .visible(false)
+        .build()?;
+
+    TrayIconBuilder::with_id("main-tray")
+        .tooltip("Codex Usage Monitor")
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button,
+                button_state,
+                rect,
+                ..
+            } if should_toggle_popover(button, button_state) => {
+                toggle_popover(tray.app_handle(), rect);
+            }
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
+pub(crate) fn update_tray_title(app: &AppHandle) {
+    let state = app.state::<crate::AppState>();
     let preferences = state.lifecycle.preferences();
     let health = state.health.latest();
     let quota = state.quota.latest();
     let view = build_tray_view(&preferences, &health, &quota, &os_locale());
-    let pinned = preferences.menu_bar.pinned_account_id.is_some();
-    let (refresh, open, pause, quit) = actions(&preferences, preferences.monitoring_paused, pinned);
-    let _ = items.status.set_text(&view.status);
-    let _ = items.updated.set_text(&view.updated);
-    let _ = items.reset.set_text(&view.reset);
-    let _ = items.refresh.set_text(refresh);
-    let _ = items.refresh.set_enabled(
-        !preferences.monitoring_paused && pinned_quota_available(&preferences, &quota),
-    );
-    let _ = items.open.set_text(open);
-    let _ = items.pause.set_text(pause);
-    let _ = items.quit.set_text(quit);
     if let Some(tray_icon) = app.tray_by_id("main-tray") {
         let _ = tray_icon.set_title(Some(&view.title));
-        let _ = tray_icon.set_tooltip(Some(tray_copy(preferences.locale).tooltip));
+        let _ = tray_icon.set_tooltip(Some(&view.status));
     }
 }
 
-pub(crate) fn setup_tray(
-    app: &AppHandle,
-    preferences: &LifecyclePreferences,
-) -> tauri::Result<TrayMenuItems> {
-    let view = build_tray_view(
-        preferences,
-        &crate::system_health::SystemHealthState::Loading,
-        &crate::quota::QuotaState::Loading,
-        &os_locale(),
-    );
-    let pinned = preferences.menu_bar.pinned_account_id.is_some();
-    let (refresh_text, open_text, pause_text, quit_text) =
-        actions(preferences, preferences.monitoring_paused, pinned);
-    let status = MenuItem::with_id(app, "summary-status", view.status, false, None::<&str>)?;
-    let updated = MenuItem::with_id(app, "summary-updated", view.updated, false, None::<&str>)?;
-    let reset = MenuItem::with_id(app, "summary-reset", view.reset, false, None::<&str>)?;
-    let refresh = MenuItem::with_id(
-        app,
-        "refresh-quota",
-        refresh_text,
-        !preferences.monitoring_paused && !pinned,
-        Some("CmdOrCtrl+R"),
-    )?;
-    let open = MenuItem::with_id(app, "open", open_text, true, Some("CmdOrCtrl+D"))?;
-    let pause = MenuItem::with_id(app, "toggle-pause", pause_text, true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", quit_text, true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status, &updated, &reset, &separator, &refresh, &open, &pause, &separator, &quit,
-        ],
-    )?;
-    let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    TrayIconBuilder::with_id("main-tray")
-        .icon(icon)
-        .icon_as_template(false)
-        .title(&view.title)
-        .tooltip(tray_copy(preferences.locale).tooltip)
-        .menu(&menu)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "refresh-quota" => {
-                let state = app.state::<AppState>();
-                let preferences = state.lifecycle.preferences();
-                if !preferences.monitoring_paused
-                    && pinned_quota_available(&preferences, &state.quota.latest())
-                {
-                    let _ = state.quota.manual_refresh();
-                }
-                let tray = app.state::<TrayMenuItems>();
-                update_tray(app, &tray);
-            }
-            "open" => {
-                let _ = show_main_window(app);
-            }
-            "toggle-pause" => {
-                let state = app.state::<AppState>();
-                let paused = !state.lifecycle.preferences().monitoring_paused;
-                if set_monitoring_paused_with_account_evidence(
-                    &state.lifecycle,
-                    &state.quota,
-                    paused,
-                )
-                .is_ok()
-                {
-                    let tray = app.state::<TrayMenuItems>();
-                    update_tray(app, &tray);
-                }
-            }
-            "quit" => app.exit(0),
-            _ => {}
-        })
-        .build(app)?;
-    Ok(TrayMenuItems {
-        status,
-        updated,
-        reset,
-        refresh,
-        open,
-        pause,
-        quit,
-    })
+    #[test]
+    fn one_physical_left_click_toggles_the_popover_once() {
+        let toggle_count = [MouseButtonState::Down, MouseButtonState::Up]
+            .into_iter()
+            .filter(|state| should_toggle_popover(MouseButton::Left, *state))
+            .count();
+
+        assert_eq!(toggle_count, 1);
+    }
+
+    #[test]
+    fn popover_is_centered_below_the_tray_icon() {
+        let icon_rect = Rect {
+            position: tauri::PhysicalPosition::new(960, 0).into(),
+            size: tauri::PhysicalSize::new(44, 24).into(),
+        };
+
+        assert_eq!(
+            popover_position(icon_rect, 420),
+            PhysicalPosition::new(772, 24)
+        );
+    }
 }

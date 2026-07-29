@@ -230,6 +230,7 @@ export function App() {
   const [quotaClock, setQuotaClock] = useState(() => Date.now());
   const [quotaThresholdDraft, setQuotaThresholdDraft] = useState("20, 10, 0");
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [loginHelpOpen, setLoginHelpOpen] = useState(false);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
     () => window.navigator.language || preferences.locale,
@@ -478,26 +479,19 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-label={t("appName")}>
-        <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
-        <div className="sidebar-copy">
-          <strong>{t("appName")}</strong>
-          <span>{t("localOnly")}</span>
+      <header className="toolbar">
+        <div className="toolbar-brand">
+          <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
+          <h1 className="toolbar-title">{t("title")}</h1>
         </div>
-      </aside>
-
-      <main className="dashboard">
-        <header className="page-header">
-          <div>
-            <p className="eyebrow">{t("eyebrow")}</p>
-            <h1>{t("title")}</h1>
-            <p className="subtitle">{t("subtitle")}</p>
-          </div>
+        <div className="toolbar-actions">
           <button className="pause-button" type="button" onClick={() => void updatePause()}>
             <span className={preferences.monitoringPaused ? "play-icon" : "pause-icon"} aria-hidden="true" />
             {preferences.monitoringPaused ? t("resume") : t("pause")}
           </button>
-        </header>
+        </div>
+      </header>
+      <main className="dashboard">
 
         <div className="status-row" aria-live="polite">
           <span className={`status-pill ${preferences.monitoringPaused ? "status-pill--paused" : ""}`}>
@@ -511,6 +505,8 @@ export function App() {
         {requestError && <div className="error-banner" role="alert">{requestError}</div>}
         {applicationStatus.storageIssue && <div className="error-banner" role="alert"><div><strong>{t("storageError")}</strong><span>{applicationStatus.storageIssue.detail}. {t("storageRecovery")}</span></div></div>}
 
+        <div className="main-grid">
+          <div>{/* left column: quota */}
         <section className="quota-section" aria-labelledby="quota-heading">
           <div className="quota-heading">
             <div>
@@ -518,13 +514,16 @@ export function App() {
               <h2 id="quota-heading">{t("quotaTitle")}</h2>
               <p>{t("quotaSubtitle")}</p>
             </div>
-            <button type="button" onClick={() => void refreshQuota()} disabled={quotaRefreshing || preferences.monitoringPaused || quotaCoolingDown}>
-              {quotaRefreshing
-                ? t("quotaLoading")
-                : quotaCoolingDown
-                  ? t("quotaRefreshAfter", { seconds: new Intl.NumberFormat(formatLocale).format(quotaRetrySeconds) })
-                  : t("quotaRefresh")}
-            </button>
+            <div className="quota-actions">
+              <button type="button" className="secondary-button" onClick={() => setLoginHelpOpen(true)}>{t("chatGptLogin")}</button>
+              <button type="button" onClick={() => void refreshQuota()} disabled={quotaRefreshing || preferences.monitoringPaused || quotaCoolingDown}>
+                {quotaRefreshing
+                  ? t("quotaLoading")
+                  : quotaCoolingDown
+                    ? t("quotaRefreshAfter", { seconds: new Intl.NumberFormat(formatLocale).format(quotaRetrySeconds) })
+                    : t("quotaRefresh")}
+              </button>
+            </div>
           </div>
           {quotaView.notice === "loading" && <div className="quota-state" role="status">{t("quotaLoading")}</div>}
           {quotaView.notice === "stale" && <div className="error-banner" role="status"><div><strong>{t("quotaStale")}</strong><span>{quotaErrorDetail} {t("quotaLastSnapshot")}</span></div></div>}
@@ -541,6 +540,35 @@ export function App() {
           </div>}
         </section>
 
+        {loginHelpOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setLoginHelpOpen(false);
+        }}>
+          <section className="login-dialog" role="dialog" aria-modal="true" aria-labelledby="login-dialog-title">
+            <div className="login-dialog__brand" aria-hidden="true"><span /><span /><span /></div>
+            <p className="eyebrow">{t("quotaEyebrow")}</p>
+            <h2 id="login-dialog-title">{t("chatGptLogin")}</h2>
+            <p>{t("chatGptLoginHelp")}</p>
+            <ol>
+              <li>{t("chatGptLoginStepApp")}</li>
+              <li>{t("chatGptLoginStepCli")} <code>codex login</code></li>
+              <li>{t("chatGptLoginStepRefresh")}</li>
+            </ol>
+            <p className="login-dialog__privacy">{t("chatGptLoginPrivacy")}</p>
+            <button type="button" onClick={() => setLoginHelpOpen(false)} autoFocus>{t("understood")}</button>
+          </section>
+        </div>}
+
+          </div>{/* end left column */}
+          <div>{/* right column: health metrics */}
+        {healthView.notice === "loading" && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
+        {healthView.notice === "empty" && <div className="state-panel" role="status">{t("empty")}</div>}
+        {healthView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{healthView.errorDetail}</span></div><button type="button" onClick={() => void refresh(true)}>{t("retry")}</button></div>}
+        {healthView.notice === "stale" && <div className="error-banner" role="status">{t("stale")}</div>}
+        {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
+        {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
+          </div>{/* end right column */}
+        </div>{/* end main-grid */}
+
         <TokenUsageSection
           state={tokenUsage.state}
           locale={preferences.locale}
@@ -548,13 +576,6 @@ export function App() {
           onQuery={tokenUsage.query}
           onReassign={tokenUsage.reassign}
         />
-
-        {healthView.notice === "loading" && <div className="state-panel" role="status"><span className="spinner" aria-hidden="true" />{t("loading")}</div>}
-        {healthView.notice === "empty" && <div className="state-panel" role="status">{t("empty")}</div>}
-        {healthView.notice === "error" && <div className="error-banner" role="alert"><div><strong>{t("error")}</strong><span>{healthView.errorDetail}</span></div><button type="button" onClick={() => void refresh(true)}>{t("retry")}</button></div>}
-        {healthView.notice === "stale" && <div className="error-banner" role="status">{t("stale")}</div>}
-        {shownMetrics && hasMetrics && <MetricsGrid metrics={shownMetrics} locale={preferences.locale} formatLocale={formatLocale} />}
-        {shownMetrics && !hasMetrics && <div className="state-panel" role="status">{t("empty")}</div>}
 
         <DataGovernanceSection
           locale={preferences.locale}
