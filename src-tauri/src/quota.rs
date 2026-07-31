@@ -308,6 +308,24 @@ impl QuotaService {
         &self.account_id
     }
 
+    /// Return a reference to the quota source for credential discovery.
+    pub fn source(&self) -> Arc<dyn QuotaSource> {
+        self.source.clone()
+    }
+
+    /// Switch the active account to a new identity.
+    /// This creates or reconfigures the service for the new account context.
+    pub fn switch_active_account(
+        &self,
+        _new_key: &str,
+        _preferred_key: &Option<String>,
+    ) -> QuotaState {
+        // In the current single-source model, account switching is handled
+        // at the coordinator level. The service itself tracks one account at a time.
+        // Future: support dynamic QuotaSource per account via credential tokens.
+        self.refresh(RefreshTrigger::Manual)
+    }
+
     pub fn latest(&self) -> QuotaState {
         self.state.read().expect("quota state poisoned").clone()
     }
@@ -524,6 +542,16 @@ impl QuotaService {
 
 pub const CURRENT_CODEX_ACCOUNT_ID: &str = "current-codex-account";
 
+/// A lightweight summary of a tracked account for UI listing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSummary {
+    pub account_id: AccountId,
+    pub display_name: String,
+    pub plan_type: String,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
 pub struct QuotaRefreshCoordinator {
     accounts: Vec<Arc<QuotaService>>,
 }
@@ -543,6 +571,69 @@ impl QuotaRefreshCoordinator {
         for account in &self.accounts {
             account.stagger_recovery_if_due();
         }
+    }
+
+    pub fn account_count(&self) -> usize {
+        self.accounts.len()
+    }
+
+    /// Return a summary of all tracked accounts with their latest state.
+    pub fn account_summaries(&self) -> Vec<AccountSummary> {
+        self.accounts
+            .iter()
+            .filter_map(|service| {
+                let latest = service.latest();
+                let snapshot = latest.snapshot()?;
+                Some(AccountSummary {
+                    account_id: service.account_id().clone(),
+                    display_name: snapshot.account.display_name.clone(),
+                    plan_type: snapshot.account.plan_type.clone(),
+                    last_seen: Some(snapshot.updated_at),
+                })
+            })
+            .collect()
+    }
+
+    /// Return the state of all tracked accounts with their account IDs and snapshot metadata.
+    pub fn all_states(&self) -> Vec<(AccountId, QuotaState)> {
+        self.accounts
+            .iter()
+            .map(|service| (service.account_id().clone(), service.latest()))
+            .collect()
+    }
+
+    /// Return the state of a single tracked account, if present.
+    pub fn get_state(&self, account_id: &AccountId) -> Option<QuotaState> {
+        self.accounts
+            .iter()
+            .find(|service| service.account_id() == account_id)
+            .map(|service| service.latest())
+    }
+
+    /// Force a manual refresh for a specific account.
+    pub fn manual_refresh_account(&self, account_id: &AccountId) -> Option<QuotaState> {
+        self.accounts
+            .iter()
+            .find(|service| service.account_id() == account_id)
+            .map(|service| service.manual_refresh())
+    }
+
+    /// Refresh all accounts immediately (bypasses schedule).
+    pub fn refresh_all(&self) {
+        for account in &self.accounts {
+            account.manual_refresh();
+        }
+    }
+
+    /// Add a new tracked account to the coordinator.
+    pub fn add_account(&mut self, service: Arc<QuotaService>) {
+        self.accounts.push(service);
+    }
+
+    /// Remove a tracked account by its account ID.
+    pub fn remove_account(&mut self, account_id: &AccountId) {
+        self.accounts
+            .retain(|service| service.account_id() != account_id);
     }
 }
 

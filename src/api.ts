@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccountSummary,
   ApplicationStatus,
   CredentialDeletionStatus,
+  DiscoveredAccount,
   ExportReceipt,
   HealthPoint,
   HealthState,
@@ -10,6 +12,7 @@ import type {
   MenuBarPreferences,
   NotificationPolicy,
   NotificationStatus,
+  OAuthLoginResult,
   QuotaState,
   TokenUsageFilters,
   TokenUsageState,
@@ -27,6 +30,14 @@ export const monitorApi = {
     invoke<NotificationStatus>("get_notification_status"),
   getQuota: () => invoke<QuotaState>("get_quota_state"),
   refreshQuota: () => invoke<QuotaState>("refresh_quota"),
+  getAllQuotas: () => invoke<Array<[string, QuotaState]>>("get_all_quotas"),
+  refreshAccount: (accountKey: string) =>
+    invoke<QuotaState>("refresh_account", { accountKey }),
+  refreshQuotas: () => invoke<Array<[string, QuotaState]>>("refresh_quotas"),
+  removeAccount: (accountKey: string, deleteHistory: boolean) =>
+    invoke<void>("remove_account", { accountKey, deleteHistory }),
+  setAccountAlias: (accountKey: string, alias: string) =>
+    invoke<DiscoveredAccount>("set_account_alias", { accountKey, alias }),
   getTokenUsage: (filters: TokenUsageFilters = {}) =>
     invoke<TokenUsageState>("get_token_usage", { filters }),
   refreshTokenUsage: (filters: TokenUsageFilters = {}) =>
@@ -63,4 +74,8 @@ export const monitorApi = {
     invoke<void>("request_credential_deletion", { accountKey }),
   setNotifications: (notifications: NotificationPolicy) =>
     invoke<LifecyclePreferences>("set_notification_preferences", { notifications }),
+  discoverAccounts: () => invoke<DiscoveredAccount[]>("discover_accounts"),
+  listAccounts: () => invoke<AccountSummary[]>("list_accounts"),
+  activateAccount: (accountKey: string) => invoke<DiscoveredAccount>("activate_account", { accountKey }),
+  startCodexLogin: () => invoke<OAuthLoginResult>("start_codex_login"),
 };

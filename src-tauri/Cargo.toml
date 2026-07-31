@@ -13,9 +13,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4.42", features = ["serde"] }
 libc = "0.2.189"
 notify = "8.2.0"
+rand = "0.8"
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -26,6 +28,9 @@ tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2.3.3"
 thiserror = "2.0.17"
+url = "2.5"
+keyring = { version = "3", features = ["apple-native"] }
+ureq = "2"
 
 [dev-dependencies]
 tauri = { version = "2.11.5", features = ["test"] }

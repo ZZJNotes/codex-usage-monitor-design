@@ -161,7 +161,7 @@ beforeEach(() => {
       return Promise.resolve();
     }
     if (command === "get_credential_deletion_status") {
-      return Promise.resolve({ status: "unavailable", reason: "keychainIntegrationUnavailable" });
+      return Promise.resolve({ status: "available" });
     }
     if (command === "set_retention_days") {
       preferencesResponse = { ...preferencesResponse, retentionDays: 30 };
@@ -174,6 +174,30 @@ beforeEach(() => {
       return Promise.resolve({
         filename: "codex-usage-2026-07-27.json",
         destination: "~/Downloads/codex-usage-2026-07-27.json",
+      });
+    }
+    if (command === "start_codex_login") {
+      return Promise.resolve({
+        accountId: "managed-1",
+        alias: "Work",
+        identityFingerprint: "abc123",
+        status: "active",
+      });
+    }
+    if (command === "discover_accounts") {
+      return Promise.resolve([]);
+    }
+    if (command === "get_all_quotas" || command === "refresh_quotas") {
+      return Promise.resolve([]);
+    }
+    if (command === "refresh_account" || command === "remove_account" || command === "set_account_alias" || command === "activate_account") {
+      return Promise.resolve({
+        accountKey: "managed-1",
+        displayName: "Work",
+        authSource: "managed",
+        isManaged: true,
+        status: "active",
+        pinned: false,
       });
     }
     return Promise.reject(new Error(`unexpected command ${command}`));
@@ -195,13 +219,15 @@ test("configures an ordered limited menu bar without inventing managed account m
     if (command === "get_quota_state") return Promise.resolve(quotaResponse);
     if (command === "get_token_usage") return Promise.resolve({ status: "loading" });
     if (command === "get_system_health") return Promise.resolve({ status: "loading" });
+    if (command === "get_credential_deletion_status") return Promise.resolve({ status: "available" });
+    if (command === "get_all_quotas") return Promise.resolve([]);
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
   render(<App />);
 
   expect(await screen.findByRole("group", { name: "菜单栏参数" })).toBeVisible();
   expect(screen.queryByRole("option", { name: /user@example.com/ })).not.toBeInTheDocument();
-  expect(screen.getByText(/不会把当前账户伪装成托管账户/)).toBeVisible();
+  expect(screen.getByText(/不会伪切换/)).toBeVisible();
   fireEvent.click(screen.getByRole("checkbox", { name: "codex · primary" }));
   await waitFor(() => expect(screen.getByRole("checkbox", { name: "codex · primary" })).toBeChecked());
   fireEvent.click(screen.getByRole("button", { name: "上移 codex · primary" }));
@@ -302,7 +328,7 @@ test("shows a textual loading state before rendering understandable system metri
   expect(screen.getByText("12.5%")).toBeVisible();
   expect(screen.getByText("正常")).toBeVisible();
   expect(screen.getByText("Codex 额度")).toBeVisible();
-  expect(screen.getByText(/这不是多账户管理/)).toBeVisible();
+  expect(screen.getByText(/支持托管多账户并列查看额度/)).toBeVisible();
   expect(screen.getByText("85% 剩余")).toBeVisible();
   expect(screen.getByRole("button", { name: "暂停监控" })).toBeEnabled();
 });
@@ -343,8 +369,9 @@ test("uses the full dashboard width and exposes truthful ChatGPT login guidance"
 
   fireEvent.click(screen.getByRole("button", { name: "登录 ChatGPT" }));
   expect(screen.getByRole("dialog", { name: "登录 ChatGPT" })).toBeVisible();
-  expect(screen.getByText(/codex login/)).toBeVisible();
-  expect(screen.getByText(/不会在本应用中保存账户密码或 OAuth 凭据/)).toBeVisible();
+  expect(screen.getByText(/OAuth PKCE/)).toBeVisible();
+  expect(screen.getByText(/不会落盘 auth\.json/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "开始 OAuth 登录" })).toBeEnabled();
 
   fireEvent.click(screen.getByRole("button", { name: "知道了" }));
   expect(screen.queryByRole("dialog", { name: "登录 ChatGPT" })).not.toBeInTheDocument();
@@ -472,7 +499,7 @@ test("offers local retention cleanup and safe export while explaining credential
   expect(screen.getByRole("button", { name: "导出 JSON" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "导出 CSV" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "删除账户凭据" })).toBeDisabled();
-  expect(screen.getByText(/Keychain 多账户授权完成后才可用/)).toBeVisible();
+  expect(screen.queryByText(/凭据删除当前不可用/)).not.toBeInTheDocument();
 
   fireEvent.change(screen.getByLabelText("统计保留期"), { target: { value: "30" } });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_retention_days", { retentionDays: 30 }));

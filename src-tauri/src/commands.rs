@@ -6,10 +6,11 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::{
     AppState, ApplicationStatus,
+    credentials::DiscoveredAccount,
     governance::{CredentialDeletionStatus, ExportFormat, ExportReceipt, HistoryCleanupResult},
     lifecycle::{LifecyclePreferences, MenuBarPreferences},
     notification::{NotificationPolicy, NotificationService, NotificationStatus},
-    quota::{QuotaService, QuotaState},
+    quota::{AccountSummary, QuotaService, QuotaState},
     set_monitoring_paused_with_account_evidence, show_main_window,
     system_health::{StaleReason, SystemHealthPoint, SystemHealthState},
     token_usage::{TokenUsageFilters, TokenUsageService, TokenUsageState},
@@ -73,10 +74,7 @@ fn visible_quota_state(paused: bool, quota: &QuotaService) -> QuotaState {
 }
 
 #[tauri::command]
-pub(crate) fn refresh_quota(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> QuotaState {
+pub(crate) fn refresh_quota(state: State<'_, AppState>, app: AppHandle) -> QuotaState {
     let result = refresh_quota_service(
         state.lifecycle.preferences().monitoring_paused,
         &state.quota,
@@ -86,10 +84,7 @@ pub(crate) fn refresh_quota(
 }
 
 #[tauri::command]
-pub(crate) fn recover_quota(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> QuotaState {
+pub(crate) fn recover_quota(state: State<'_, AppState>, app: AppHandle) -> QuotaState {
     let result = recover_quota_service(
         state.lifecycle.preferences().monitoring_paused,
         &state.quota,
@@ -379,6 +374,244 @@ pub(crate) fn show_dashboard(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub(crate) fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// List managed accounts (secret-free DTO). Does not scan CLIProxyAPI/Codex auth files.
+#[tauri::command]
+pub(crate) fn discover_accounts(state: State<'_, AppState>) -> Vec<DiscoveredAccount> {
+    let mut accounts = state.credentials.discover_accounts();
+    // Always expose the current Codex fallback as a non-managed entry when available.
+    if let Some(snapshot) = state.quota.latest().snapshot() {
+        accounts.insert(
+            0,
+            DiscoveredAccount {
+                account_key: crate::quota::CURRENT_CODEX_ACCOUNT_ID.to_string(),
+                display_name: snapshot.account.display_name.clone(),
+                auth_source: "active".to_string(),
+                is_managed: false,
+                status: None,
+                pinned: false,
+            },
+        );
+    }
+    accounts
+}
+
+/// List all tracked account summaries from the refresh coordinator.
+#[tauri::command]
+pub(crate) fn list_accounts(state: State<'_, AppState>) -> Vec<AccountSummary> {
+    let coordinator = state
+        .quota_refresh
+        .lock()
+        .expect("quota refresh lock poisoned");
+    coordinator.account_summaries()
+}
+
+/// Return independent quota states for every tracked account.
+#[tauri::command]
+pub(crate) fn get_all_quotas(state: State<'_, AppState>) -> Vec<(String, QuotaState)> {
+    let coordinator = state
+        .quota_refresh
+        .lock()
+        .expect("quota refresh lock poisoned");
+    coordinator
+        .all_states()
+        .into_iter()
+        .map(|(account_id, quota)| {
+            (
+                account_id.as_str().to_string(),
+                visible_quota_state_value(state.lifecycle.preferences().monitoring_paused, quota),
+            )
+        })
+        .collect()
+}
+
+fn visible_quota_state_value(paused: bool, current: QuotaState) -> QuotaState {
+    if paused {
+        match current {
+            QuotaState::Error {
+                reason: crate::quota::QuotaErrorReason::Paused,
+                ..
+            } => current,
+            other => QuotaState::Error {
+                reason: crate::quota::QuotaErrorReason::Paused,
+                last_snapshot: other.snapshot().cloned(),
+                failed_at: Utc::now(),
+                retry_at: None,
+            },
+        }
+    } else {
+        current
+    }
+}
+
+/// Pin preference only — does not switch Codex login or rewrite auth.json.
+#[tauri::command]
+pub(crate) fn activate_account(
+    account_key: String,
+    state: State<'_, AppState>,
+) -> Result<DiscoveredAccount, String> {
+    let mut accounts = state.credentials.discover_accounts();
+    if let Some(snapshot) = state.quota.latest().snapshot() {
+        accounts.insert(
+            0,
+            DiscoveredAccount {
+                account_key: crate::quota::CURRENT_CODEX_ACCOUNT_ID.to_string(),
+                display_name: snapshot.account.display_name.clone(),
+                auth_source: "active".to_string(),
+                is_managed: false,
+                status: None,
+                pinned: false,
+            },
+        );
+    }
+    let account = accounts
+        .into_iter()
+        .find(|account| account.account_key == account_key)
+        .ok_or_else(|| format!("Account '{account_key}' not found"))?;
+    let _ = state.lifecycle.set_active_account(Some(&account_key))?;
+    if account.is_managed {
+        let _ = state.credentials.set_pinned(&account_key, true);
+    }
+    Ok(account)
+}
+
+#[tauri::command]
+pub(crate) fn refresh_account(
+    account_key: String,
+    state: State<'_, AppState>,
+) -> Result<QuotaState, String> {
+    if state.lifecycle.preferences().monitoring_paused {
+        return Ok(visible_quota_state(true, &state.quota));
+    }
+    let coordinator = state
+        .quota_refresh
+        .lock()
+        .expect("quota refresh lock poisoned");
+    coordinator
+        .manual_refresh_account(&account_key.as_str().into())
+        .ok_or_else(|| format!("Account '{account_key}' is not tracked"))
+}
+
+#[tauri::command]
+pub(crate) fn refresh_quotas(state: State<'_, AppState>) -> Vec<(String, QuotaState)> {
+    if !state.lifecycle.preferences().monitoring_paused {
+        let coordinator = state
+            .quota_refresh
+            .lock()
+            .expect("quota refresh lock poisoned");
+        coordinator.refresh_all();
+    }
+    get_all_quotas(state)
+}
+
+#[tauri::command]
+pub(crate) fn remove_account(
+    account_key: String,
+    delete_history: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mode = if delete_history {
+        crate::credentials::DeleteMode::CredentialsAndHistory
+    } else {
+        crate::credentials::DeleteMode::CredentialsOnly
+    };
+    state.credentials.delete_account(&account_key, mode)?;
+    if delete_history {
+        let _ = state.governance.delete_account_history(&account_key)?;
+    }
+    let mut coordinator = state
+        .quota_refresh
+        .lock()
+        .expect("quota refresh lock poisoned");
+    coordinator.remove_account(&account_key.as_str().into());
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn set_account_alias(
+    account_key: String,
+    alias: String,
+    state: State<'_, AppState>,
+) -> Result<DiscoveredAccount, String> {
+    let record = state.credentials.set_alias(&account_key, &alias)?;
+    Ok(DiscoveredAccount {
+        account_key: record.account_id,
+        display_name: record.alias,
+        auth_source: "managed".to_string(),
+        is_managed: true,
+        status: Some(record.status),
+        pinned: record.pinned,
+    })
+}
+
+/// Start Codex OAuth PKCE; tokens stay in Keychain/memory. Returns secret-free DTO fields only.
+#[tauri::command]
+pub(crate) fn start_codex_login(
+    state: State<'_, AppState>,
+) -> Result<crate::oauth::OAuthResultDto, String> {
+    let pending = state
+        .credentials
+        .begin_pending_account("")
+        .map_err(|error| error.to_string())?;
+    let abandon = |credentials: &crate::credentials::CredentialService, account_id: &str| {
+        let _ = credentials.abandon_pending(account_id);
+    };
+    let tokens = match crate::oauth::run_codex_oauth_login(None) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            abandon(&state.credentials, &pending.account_id);
+            return Err(format!("Codex OAuth login failed: {error}"));
+        }
+    };
+    let alias = if tokens.email == "unknown" {
+        format!("Account · {}", &pending.account_id[..8])
+    } else {
+        tokens.email.clone()
+    };
+    let record = match state.credentials.complete_authorization(
+        &pending.account_id,
+        &tokens.account_id,
+        &alias,
+        "unknown",
+        &tokens.refresh_token,
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            let _ = state.credentials.delete_account(
+                &pending.account_id,
+                crate::credentials::DeleteMode::CredentialsAndHistory,
+            );
+            return Err(error);
+        }
+    };
+
+    let source = std::sync::Arc::new(crate::quota_token::DirectHttpsQuotaSource::new(
+        record.account_id.clone(),
+        record.identity_fingerprint.clone(),
+        record.alias.clone(),
+        state.credentials.clone(),
+    ));
+    let service = std::sync::Arc::new(QuotaService::with_store(
+        record.account_id.clone(),
+        source,
+        std::sync::Arc::new(state.governance.database().clone()),
+    ));
+    {
+        let mut coordinator = state
+            .quota_refresh
+            .lock()
+            .expect("quota refresh lock poisoned");
+        coordinator.add_account(service.clone());
+    }
+    let _ = service.manual_refresh();
+
+    Ok(crate::oauth::OAuthResultDto {
+        account_id: record.account_id,
+        alias: record.alias,
+        identity_fingerprint: record.identity_fingerprint,
+        status: "active".to_string(),
+    })
 }
 
 #[cfg(test)]

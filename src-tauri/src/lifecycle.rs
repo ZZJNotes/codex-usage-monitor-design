@@ -26,6 +26,8 @@ pub struct LifecyclePreferences {
     pub menu_bar: MenuBarPreferences,
     #[serde(default)]
     pub notifications: NotificationPolicy,
+    #[serde(default)]
+    pub active_account_key: Option<String>,
 }
 
 pub const MAX_MENU_BAR_PARAMETERS: u8 = 5;
@@ -197,6 +199,7 @@ impl Default for LifecyclePreferences {
             launch_at_login: false,
             menu_bar: MenuBarPreferences::default(),
             notifications: NotificationPolicy::default(),
+            active_account_key: None,
         }
     }
 }
@@ -293,6 +296,14 @@ impl LifecycleService {
     ) -> Result<LifecyclePreferences, String> {
         notifications.validate()?;
         self.update(|preferences| preferences.notifications = notifications)
+    }
+
+    pub fn set_active_account(
+        &self,
+        account_key: Option<&str>,
+    ) -> Result<LifecyclePreferences, String> {
+        let key = account_key.map(|s| s.to_string());
+        self.update(|preferences| preferences.active_account_key = key)
     }
 
     fn update(
