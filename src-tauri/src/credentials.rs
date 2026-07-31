@@ -505,6 +505,21 @@ impl CredentialService {
         Ok(())
     }
 
+    pub fn abandon_pending(&self, account_id: &str) -> Result<(), String> {
+        let lock = self.lock_for(account_id);
+        let _guard = lock.lock().expect("account lock poisoned");
+        let Some(record) = self.database.get_managed_account(account_id)? else {
+            return Ok(());
+        };
+        if record.status != ManagedAccountStatus::PendingAuthorization {
+            return Err(format!(
+                "account '{account_id}' is not pending authorization"
+            ));
+        }
+        let _ = self.store.delete(account_id);
+        self.database.delete_managed_account(account_id)
+    }
+
     pub fn reconcile_on_startup(&self) -> Result<(), String> {
         for account in self.list_managed()? {
             if account.status == ManagedAccountStatus::PendingAuthorization {
@@ -525,10 +540,10 @@ impl CredentialService {
                         self.database.upsert_managed_account(&record)?;
                     }
                 }
-            } else if account.status == ManagedAccountStatus::Deleting {
-                if let Some(intent) = account.delete_intent.clone() {
-                    let _ = self.delete_account(&account.account_id, intent.mode);
-                }
+            } else if account.status == ManagedAccountStatus::Deleting
+                && let Some(intent) = account.delete_intent.clone()
+            {
+                let _ = self.delete_account(&account.account_id, intent.mode);
             }
         }
         Ok(())
@@ -610,6 +625,16 @@ mod tests {
         let dto = serde_json::to_string(&listed[0]).unwrap();
         assert!(!dto.contains("refresh-secret"));
         assert!(!dto.contains("token"));
+    }
+
+    #[test]
+    fn abandon_pending_removes_incomplete_authorization() {
+        let database = Database::in_memory().unwrap();
+        let service =
+            CredentialService::new(database, Arc::new(InMemoryCredentialStore::default()));
+        let pending = service.begin_pending_account("Temp").unwrap();
+        service.abandon_pending(&pending.account_id).unwrap();
+        assert!(service.list_managed().unwrap().is_empty());
     }
 
     #[test]

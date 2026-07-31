@@ -16,13 +16,21 @@ pub(crate) struct TrayView {
 }
 
 pub(crate) struct TrayCopy {
+    #[allow(dead_code)]
     pub(crate) refresh_current: &'static str,
+    #[allow(dead_code)]
     pub(crate) refresh_pinned: &'static str,
+    #[allow(dead_code)]
     pub(crate) refresh_generic: &'static str,
+    #[allow(dead_code)]
     pub(crate) open: &'static str,
+    #[allow(dead_code)]
     pub(crate) pause: &'static str,
+    #[allow(dead_code)]
     pub(crate) resume: &'static str,
+    #[allow(dead_code)]
     pub(crate) quit: &'static str,
+    #[allow(dead_code)]
     pub(crate) tooltip: &'static str,
     default_title: &'static str,
     system_paused: &'static str,

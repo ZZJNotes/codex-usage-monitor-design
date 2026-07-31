@@ -255,13 +255,6 @@ impl QuotaNormalizationError {
             }
         }
     }
-
-    #[cfg(test)]
-    fn message(self) -> String {
-        match self {
-            Self::Authentication(message) | Self::InvalidResponse(message) => message,
-        }
-    }
 }
 
 #[cfg(test)]

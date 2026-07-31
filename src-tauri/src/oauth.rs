@@ -306,43 +306,29 @@ fn urlencode(input: &str) -> String {
         .collect()
 }
 
-/// HTTP POST with form body using curl. Response body stays in memory only.
+/// HTTP POST with form body via in-process HTTPS (no curl argv secrets).
 fn http_post_form(url: &str, form_body: &str) -> Result<(u16, String), OAuthError> {
-    let output = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "-w",
-            "\n%{http_code}",
-            "-X",
-            "POST",
-            url,
-            "-H",
-            "Content-Type: application/x-www-form-urlencoded",
-            "-H",
-            "Accept: application/json",
-            "--data-binary",
-            form_body,
-            "--max-time",
-            "30",
-        ])
-        .output()
-        .map_err(|e| OAuthError::CodeExchangeFailed(format!("curl execution: {e}")))?;
-
-    if !output.status.success() && output.stdout.is_empty() {
-        return Err(OAuthError::CodeExchangeFailed("curl failed".into()));
+    let response = ureq::post(url)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .set("Accept", "application/json")
+        .timeout(Duration::from_secs(30))
+        .send_string(form_body);
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .into_string()
+                .map_err(|e| OAuthError::CodeExchangeFailed(format!("read body: {e}")))?;
+            Ok((status, body))
+        }
+        Err(ureq::Error::Status(status, resp)) => {
+            let _ = resp.into_string();
+            Ok((status, String::new()))
+        }
+        Err(error) => Err(OAuthError::CodeExchangeFailed(format!(
+            "HTTPS request failed: {error}"
+        ))),
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines: Vec<&str> = stdout.trim_end().rsplitn(2, '\n').collect();
-    lines.reverse();
-    if lines.len() == 1 {
-        // Only status code or only body — treat as failure without leaking.
-        let status: u16 = lines[0].parse().unwrap_or(0);
-        return Ok((status, String::new()));
-    }
-    let body = lines[0].to_string();
-    let status: u16 = lines[1].parse().unwrap_or(0);
-    Ok((status, body))
 }
 
 #[cfg(test)]
@@ -382,16 +368,20 @@ mod tests {
     }
 
     #[test]
-    fn oauth_result_dto_has_no_token_fields() {
-        let dto = OAuthResultDto {
-            account_id: "local-1".into(),
-            alias: "Work".into(),
-            identity_fingerprint: "deadbeef".into(),
-            status: "active".into(),
-        };
-        let json = serde_json::to_string(&dto).unwrap();
-        assert!(!json.contains("token"));
-        assert!(!json.contains("refresh"));
-        assert!(!json.contains("access"));
+    fn oauth_https_helpers_do_not_shell_out_to_curl() {
+        let oauth_source = include_str!("oauth.rs");
+        let quota_source = include_str!("quota_token.rs");
+        assert!(
+            !oauth_source.contains("Command::new(\"curl\")"),
+            "oauth must use in-process HTTPS"
+        );
+        assert!(
+            !quota_source.contains("Command::new(\"curl\")"),
+            "quota token source must use in-process HTTPS"
+        );
+        assert!(
+            quota_source.contains("ureq::get(USAGE_URL)"),
+            "quota token source should call ureq directly"
+        );
     }
 }

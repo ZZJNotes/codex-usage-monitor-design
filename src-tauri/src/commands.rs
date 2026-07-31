@@ -554,29 +554,37 @@ pub(crate) fn start_codex_login(
         .credentials
         .begin_pending_account("")
         .map_err(|error| error.to_string())?;
-    let tokens = crate::oauth::run_codex_oauth_login(None)
-        .map_err(|error| format!("Codex OAuth login failed: {error}"))?;
+    let abandon = |credentials: &crate::credentials::CredentialService, account_id: &str| {
+        let _ = credentials.abandon_pending(account_id);
+    };
+    let tokens = match crate::oauth::run_codex_oauth_login(None) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            abandon(&state.credentials, &pending.account_id);
+            return Err(format!("Codex OAuth login failed: {error}"));
+        }
+    };
     let alias = if tokens.email == "unknown" {
         format!("Account · {}", &pending.account_id[..8])
     } else {
         tokens.email.clone()
     };
-    let record = state
-        .credentials
-        .complete_authorization(
-            &pending.account_id,
-            &tokens.account_id,
-            &alias,
-            "unknown",
-            &tokens.refresh_token,
-        )
-        .map_err(|error| {
+    let record = match state.credentials.complete_authorization(
+        &pending.account_id,
+        &tokens.account_id,
+        &alias,
+        "unknown",
+        &tokens.refresh_token,
+    ) {
+        Ok(record) => record,
+        Err(error) => {
             let _ = state.credentials.delete_account(
                 &pending.account_id,
                 crate::credentials::DeleteMode::CredentialsAndHistory,
             );
-            error
-        })?;
+            return Err(error);
+        }
+    };
 
     let source = std::sync::Arc::new(crate::quota_token::DirectHttpsQuotaSource::new(
         record.account_id.clone(),

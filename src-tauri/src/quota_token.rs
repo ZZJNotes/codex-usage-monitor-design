@@ -142,51 +142,34 @@ fn http_get_usage(
     access_token: &str,
     chatgpt_account_id: &str,
 ) -> Result<(u16, String), QuotaRefreshError> {
-    let auth_header = format!("Authorization: Bearer {access_token}");
-    let account_header = format!("ChatGPT-Account-Id: {chatgpt_account_id}");
-    let output = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "-w",
-            "\n%{http_code}",
-            "-X",
-            "GET",
-            USAGE_URL,
-            "-H",
-            &auth_header,
-            "-H",
-            &account_header,
-            "-H",
-            "Accept: application/json",
-            "-H",
-            "User-Agent: codex-cli",
-            "--max-time",
-            "30",
-        ])
-        .output()
-        .map_err(|error| {
-            QuotaRefreshError::new(
-                QuotaFailureKind::Transport,
-                format!("usage request failed: {error}"),
-            )
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut parts: Vec<&str> = stdout.trim_end().rsplitn(2, '\n').collect();
-    parts.reverse();
-    if parts.is_empty() {
-        return Err(QuotaRefreshError::new(
+    // In-process HTTPS only — never pass Bearer tokens through subprocess argv.
+    let response = ureq::get(USAGE_URL)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("ChatGPT-Account-Id", chatgpt_account_id)
+        .set("Accept", "application/json")
+        .set("User-Agent", "codex-cli")
+        .timeout(std::time::Duration::from_secs(30))
+        .call();
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.into_string().map_err(|error| {
+                QuotaRefreshError::new(
+                    QuotaFailureKind::Transport,
+                    format!("usage body read failed: {error}"),
+                )
+            })?;
+            Ok((status, body))
+        }
+        Err(ureq::Error::Status(status, resp)) => {
+            let _ = resp.into_string();
+            Ok((status, String::new()))
+        }
+        Err(error) => Err(QuotaRefreshError::new(
             QuotaFailureKind::Transport,
-            "empty usage response",
-        ));
+            format!("usage request failed: {error}"),
+        )),
     }
-    if parts.len() == 1 {
-        let status: u16 = parts[0].parse().unwrap_or(0);
-        return Ok((status, String::new()));
-    }
-    let body = parts[0].to_string();
-    let status: u16 = parts[1].parse().unwrap_or(0);
-    Ok((status, body))
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,5 +312,14 @@ mod tests {
             }
         }"#;
         assert!(normalize_wham_usage(body, "local-1", "Work", Utc::now()).is_err());
+    }
+
+    #[test]
+    fn usage_fetch_does_not_shell_out_to_curl() {
+        let source = include_str!("quota_token.rs");
+        assert!(
+            !source.contains("Command::new(\"curl\")"),
+            "quota_token must not pass Bearer tokens through curl argv"
+        );
     }
 }
