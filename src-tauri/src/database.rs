@@ -131,9 +131,158 @@ impl Database {
                    file_size INTEGER NOT NULL,
                    parser_context_json TEXT NOT NULL,
                    updated_at_utc TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS managed_accounts (
+                   account_id TEXT PRIMARY KEY,
+                   alias TEXT NOT NULL,
+                   identity_fingerprint TEXT NOT NULL,
+                   plan_type TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   pinned INTEGER NOT NULL DEFAULT 0,
+                   delete_intent_json TEXT,
+                   created_at_utc TEXT NOT NULL,
+                   updated_at_utc TEXT NOT NULL
                  );",
             )
             .map_err(|error| error.to_string())
+    }
+
+    pub fn list_managed_accounts(
+        &self,
+    ) -> Result<Vec<crate::credentials::ManagedAccountRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT account_id, alias, identity_fingerprint, plan_type, status, pinned,
+                            delete_intent_json, created_at_utc, updated_at_utc
+                     FROM managed_accounts ORDER BY created_at_utc",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            let mut accounts = Vec::new();
+            for row in rows {
+                let (
+                    account_id,
+                    alias,
+                    identity_fingerprint,
+                    plan_type,
+                    status,
+                    pinned,
+                    delete_intent_json,
+                    created_at,
+                    updated_at,
+                ) = row.map_err(|error| error.to_string())?;
+                accounts.push(crate::credentials::ManagedAccountRecord {
+                    account_id,
+                    alias,
+                    identity_fingerprint,
+                    plan_type,
+                    status: serde_json::from_value(serde_json::Value::String(status.clone()))
+                        .or_else(|_| serde_json::from_str(&format!("\"{status}\"")))
+                        .map_err(|error| error.to_string())?,
+                    pinned: pinned != 0,
+                    delete_intent: delete_intent_json
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
+                    created_at,
+                    updated_at,
+                });
+            }
+            Ok(accounts)
+        })
+    }
+
+    pub fn get_managed_account(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<crate::credentials::ManagedAccountRecord>, String> {
+        Ok(self
+            .list_managed_accounts()?
+            .into_iter()
+            .find(|account| account.account_id == account_id))
+    }
+
+    pub fn upsert_managed_account(
+        &self,
+        record: &crate::credentials::ManagedAccountRecord,
+    ) -> Result<(), String> {
+        let status = match serde_json::to_value(record.status) {
+            Ok(serde_json::Value::String(value)) => value,
+            _ => return Err("invalid managed account status".into()),
+        };
+        let delete_intent_json = record
+            .delete_intent
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO managed_accounts (
+                       account_id, alias, identity_fingerprint, plan_type, status, pinned,
+                       delete_intent_json, created_at_utc, updated_at_utc
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(account_id) DO UPDATE SET
+                       alias = excluded.alias,
+                       identity_fingerprint = excluded.identity_fingerprint,
+                       plan_type = excluded.plan_type,
+                       status = excluded.status,
+                       pinned = excluded.pinned,
+                       delete_intent_json = excluded.delete_intent_json,
+                       updated_at_utc = excluded.updated_at_utc",
+                    params![
+                        record.account_id,
+                        record.alias,
+                        record.identity_fingerprint,
+                        record.plan_type,
+                        status,
+                        if record.pinned { 1 } else { 0 },
+                        delete_intent_json,
+                        record.created_at,
+                        record.updated_at,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn clear_managed_account_pins(&self) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection
+                .execute("UPDATE managed_accounts SET pinned = 0", [])
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_managed_account(&self, account_id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM managed_accounts WHERE account_id = ?1",
+                    params![account_id],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
     }
 
     pub fn record_health_metrics(

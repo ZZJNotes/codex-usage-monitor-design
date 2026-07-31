@@ -88,9 +88,41 @@ export type ExportReceipt = {
   destination: string;
 };
 
-export type CredentialDeletionStatus = {
-  status: "unavailable";
-  reason: "keychainIntegrationUnavailable";
+export type CredentialDeletionStatus =
+  | { status: "available" }
+  | { status: "unavailable"; reason: string };
+
+// ---- Multi-account support ----
+
+/** A ChatGPT/Codex account listed for management (secret-free). */
+export type DiscoveredAccount = {
+  accountKey: string;
+  displayName: string;
+  authSource: string;
+  isManaged: boolean;
+  status?:
+    | "pendingAuthorization"
+    | "active"
+    | "reauthorizationRequired"
+    | "credentialDeleted"
+    | "deleting"
+    | null;
+  pinned?: boolean;
+};
+
+/** An account tracked by the quota refresh coordinator. */
+export type AccountSummary = {
+  accountId: string;
+  displayName: string;
+  planType: string;
+  lastSeen: string | null;
+};
+
+export type OAuthLoginResult = {
+  accountId: string;
+  alias: string;
+  identityFingerprint: string;
+  status: string;
 };
 
 export type HealthPoint = {

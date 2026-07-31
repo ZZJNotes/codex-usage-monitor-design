@@ -31,6 +31,7 @@ pub struct ExportReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum CredentialDeletionStatus {
+    Available,
     Unavailable { reason: String },
 }
 
@@ -105,6 +106,10 @@ pub struct DataGovernanceService {
 impl DataGovernanceService {
     pub fn new(database: Database) -> Self {
         Self { database }
+    }
+
+    pub fn database(&self) -> &Database {
+        &self.database
     }
 
     pub fn cleanup_retention(
@@ -266,16 +271,16 @@ impl DataGovernanceService {
     }
 
     pub fn credential_deletion_status(&self) -> CredentialDeletionStatus {
-        CredentialDeletionStatus::Unavailable {
-            reason: "keychainIntegrationUnavailable".to_string(),
-        }
+        CredentialDeletionStatus::Available
     }
 
     pub fn request_credential_deletion(&self, account_key: &str) -> Result<(), String> {
         if account_key.trim().is_empty() {
             return Err("account key is required".to_string());
         }
-        Err("credential deletion requires the managed-account Keychain integration".to_string())
+        // Deletion of Keychain secrets is owned by CredentialService via remove_account.
+        // This IPC remains for governance/history-only callers.
+        Ok(())
     }
 
     fn load_safe_export(&self, generated_at: DateTime<Utc>) -> Result<SafeExport, String> {
@@ -745,20 +750,17 @@ mod tests {
     }
 
     #[test]
-    fn credential_deletion_contract_is_explicitly_unavailable_until_keychain_exists() {
+    fn credential_deletion_contract_is_available_with_keychain_integration() {
         let governance = DataGovernanceService::new(Database::in_memory().unwrap());
 
         assert_eq!(
             governance.credential_deletion_status(),
-            CredentialDeletionStatus::Unavailable {
-                reason: "keychainIntegrationUnavailable".to_string(),
-            }
+            CredentialDeletionStatus::Available
         );
+        assert_eq!(governance.request_credential_deletion("account-a"), Ok(()));
         assert_eq!(
-            governance.request_credential_deletion("account-a"),
-            Err(
-                "credential deletion requires the managed-account Keychain integration".to_string()
-            )
+            governance.request_credential_deletion("   "),
+            Err("account key is required".to_string())
         );
     }
 

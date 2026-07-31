@@ -22,8 +22,7 @@ export function DataGovernanceSection({
 }: Props) {
   const t = translator(locale);
   const [credentialDeletion, setCredentialDeletion] = useState<CredentialDeletionStatus>({
-    status: "unavailable",
-    reason: "keychainIntegrationUnavailable",
+    status: "available",
   });
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +89,11 @@ export function DataGovernanceSection({
         <button type="button" disabled={!accountKey} onClick={() => {
           if (accountKey && window.confirm(t("governanceConfirmAccount"))) void run(monitorApi.deleteAccountHistory(accountKey));
         }}>{t("deleteAccountHistory")}</button>
-        <button type="button" disabled={credentialDeletion.status === "unavailable"}>{t("deleteCredentials")}</button>
+        <button type="button" disabled={!accountKey || credentialDeletion.status === "unavailable"} onClick={() => {
+          if (!accountKey) return;
+          const deleteHistory = window.confirm(t("deleteCredentialsAndHistoryConfirm"));
+          void run(monitorApi.removeAccount(accountKey, deleteHistory));
+        }}>{t("deleteCredentials")}</button>
       </div>
       {credentialDeletion.status === "unavailable" && <p className="governance-note" role="status">{t("credentialUnavailable")}</p>}
       <p className="governance-note">{t("checkpointRetentionHelp")}</p>

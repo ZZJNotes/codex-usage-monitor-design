@@ -849,6 +849,128 @@ h2:not(.metric-card h2) {
 .login-dialog button:hover {
   border-color: var(--ink-muted);
 }
+.login-dialog__actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+.login-dialog__actions .secondary-button {
+  color: var(--ink-muted);
+  border-color: var(--line);
+}
+.login-dialog__actions .secondary-button:hover {
+  border-color: var(--ink-muted);
+}
+.login-dialog__result {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  word-break: break-all;
+}
+.login-dialog__result code {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--cyan);
+}
+.login-dialog__path {
+  color: var(--ink-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  word-break: break-all;
+}
+
+/* ---- Account management dialog --------------------------------- */
+.account-dialog {
+  width: min(600px, 100%);
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  color: var(--ink-secondary);
+  background: var(--bg);
+  box-shadow: none;
+}
+.account-dialog h2 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 16px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--ink);
+}
+.account-dialog p {
+  color: var(--ink-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.65;
+}
+.account-dialog button {
+  min-width: 80px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  color: var(--ink);
+  background: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  padding: 6px 12px;
+}
+.account-dialog button:hover {
+  border-color: var(--ink-muted);
+}
+.account-dialog button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.account-manager-actions {
+  margin: 16px 0;
+}
+.account-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.account-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.account-list-item:last-child {
+  border-bottom: none;
+}
+.account-info {
+  display: grid;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.account-info strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.account-detail {
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+.account-badge {
+  display: inline-block;
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 
 /* ---- Settings sections -------------------------------------- */
 .settings-card {

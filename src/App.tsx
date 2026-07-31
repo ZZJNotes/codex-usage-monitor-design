@@ -7,6 +7,7 @@ import { TokenUsageSection } from "./token-usage/TokenUsageSection";
 import { useTokenUsage } from "./token-usage/useTokenUsage";
 import type {
   ApplicationStatus,
+  DiscoveredAccount,
   HealthMetrics,
   HealthPoint,
   HealthState,
@@ -231,6 +232,14 @@ export function App() {
   const [quotaThresholdDraft, setQuotaThresholdDraft] = useState("20, 10, 0");
   const [requestError, setRequestError] = useState<string | null>(null);
   const [loginHelpOpen, setLoginHelpOpen] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginResult, setLoginResult] = useState<{ accountId: string; alias: string } | null>(null);
+  const [accountQuotas, setAccountQuotas] = useState<Array<[string, QuotaState]>>([]);
+  const [deletingAccount, setDeletingAccount] = useState<string | null>(null);
+  const [accountManagerOpen, setAccountManagerOpen] = useState(false);
+  const [discoveredAccounts, setDiscoveredAccounts] = useState<DiscoveredAccount[]>([]);
+  const [discoveringAccounts, setDiscoveringAccounts] = useState(false);
+  const [switchingAccount, setSwitchingAccount] = useState<string | null>(null);
   const t = useMemo(() => translator(preferences.locale), [preferences.locale]);
   const formatLocale = useMemo(
     () => window.navigator.language || preferences.locale,
@@ -515,7 +524,27 @@ export function App() {
               <p>{t("quotaSubtitle")}</p>
             </div>
             <div className="quota-actions">
-              <button type="button" className="secondary-button" onClick={() => setLoginHelpOpen(true)}>{t("chatGptLogin")}</button>
+              <button type="button" className="secondary-button" onClick={() => {
+                setLoginHelpOpen(true);
+                setLoginResult(null);
+              }}>{t("chatGptLogin")}</button>
+              <button type="button" className="secondary-button" onClick={async () => {
+                setAccountManagerOpen(true);
+                setDiscoveringAccounts(true);
+                try {
+                  const [accounts, quotas] = await Promise.all([
+                    monitorApi.discoverAccounts(),
+                    monitorApi.getAllQuotas(),
+                  ]);
+                  setDiscoveredAccounts(accounts);
+                  setAccountQuotas(quotas);
+                } catch {
+                  setDiscoveredAccounts([]);
+                  setAccountQuotas([]);
+                } finally {
+                  setDiscoveringAccounts(false);
+                }
+              }}>{t("accountManagement")}</button>
               <button type="button" onClick={() => void refreshQuota()} disabled={quotaRefreshing || preferences.monitoringPaused || quotaCoolingDown}>
                 {quotaRefreshing
                   ? t("quotaLoading")
@@ -547,14 +576,148 @@ export function App() {
             <div className="login-dialog__brand" aria-hidden="true"><span /><span /><span /></div>
             <p className="eyebrow">{t("quotaEyebrow")}</p>
             <h2 id="login-dialog-title">{t("chatGptLogin")}</h2>
-            <p>{t("chatGptLoginHelp")}</p>
+            <p>{t("loginHelpDescription")}</p>
             <ol>
-              <li>{t("chatGptLoginStepApp")}</li>
-              <li>{t("chatGptLoginStepCli")} <code>codex login</code></li>
-              <li>{t("chatGptLoginStepRefresh")}</li>
+              <li>{t("loginStepOAuth")}</li>
+              <li>{t("loginStepCallback")}</li>
+              <li>{t("loginStepDone")}</li>
             </ol>
             <p className="login-dialog__privacy">{t("chatGptLoginPrivacy")}</p>
-            <button type="button" onClick={() => setLoginHelpOpen(false)} autoFocus>{t("understood")}</button>
+            <div className="login-dialog__actions">
+              <button type="button" onClick={async () => {
+                setLoggingIn(true);
+                try {
+                  const result = await monitorApi.startCodexLogin();
+                  setLoginResult({ accountId: result.accountId, alias: result.alias });
+                  const accounts = await monitorApi.discoverAccounts();
+                  setDiscoveredAccounts(accounts);
+                  const all = await monitorApi.getAllQuotas();
+                  setAccountQuotas(all);
+                  await refreshQuota();
+                } catch (error) {
+                  setRequestError(errorMessage(error));
+                } finally {
+                  setLoggingIn(false);
+                }
+              }} disabled={loggingIn} autoFocus>
+                {loggingIn ? t("quotaLoading") : t("loginStart")}
+              </button>
+              <button type="button" className="secondary-button" onClick={() => { setLoginHelpOpen(false); setLoginResult(null); }}>
+                {t("cancel")}
+              </button>
+            </div>
+            {loginResult && <div className="login-dialog__result"><p>{t("loginSuccess")}</p><p>{loginResult.alias}</p></div>}
+            <button type="button" onClick={() => { setLoginHelpOpen(false); setLoginResult(null); }}>{t("understood")}</button>
+          </section>
+        </div>}
+
+        {accountManagerOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setAccountManagerOpen(false);
+        }}>
+          <section className="account-dialog" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title">
+            <div className="login-dialog__brand" aria-hidden="true"><span /><span /><span /></div>
+            <p className="eyebrow">{t("quotaEyebrow")}</p>
+            <h2 id="account-dialog-title">{t("accountManagement")}</h2>
+            <p>{t("accountManagementHelp")}</p>
+            <div className="account-manager-actions">
+              <button type="button" onClick={async () => {
+                setDiscoveringAccounts(true);
+                try {
+                  const [accounts, quotas] = await Promise.all([
+                    monitorApi.discoverAccounts(),
+                    monitorApi.getAllQuotas(),
+                  ]);
+                  setDiscoveredAccounts(accounts);
+                  setAccountQuotas(quotas);
+                } catch {
+                  setDiscoveredAccounts([]);
+                  setAccountQuotas([]);
+                } finally {
+                  setDiscoveringAccounts(false);
+                }
+              }} disabled={discoveringAccounts}>
+                {discoveringAccounts ? t("discovering") : t("refreshAccountList")}
+              </button>
+              <button type="button" className="secondary-button" onClick={() => {
+                setAccountManagerOpen(false);
+                setLoginHelpOpen(true);
+                setLoginResult(null);
+              }}>{t("addManagedAccount")}</button>
+            </div>
+            {discoveringAccounts && <div className="quota-state" role="status">{t("discovering")}</div>}
+            {!discoveringAccounts && discoveredAccounts.length === 0 && <div className="quota-state" role="status">{t("noAccountsFound")}</div>}
+            {discoveredAccounts.length > 0 && <ul className="account-list">
+              {discoveredAccounts.map((account) => {
+                const isActive = quotaSnapshot?.account.id === account.accountKey
+                  || preferences.menuBar.pinnedAccountId === account.accountKey;
+                const quotaPair = accountQuotas.find(([id]) => id === account.accountKey);
+                const accountQuota = quotaPair ? toQuotaView(quotaPair[1]) : null;
+                return <li key={account.accountKey} className="account-list-item">
+                  <div className="account-info">
+                    <strong>{account.displayName}</strong>
+                    <span className="account-detail">{t("accountSource")}: {
+                      account.authSource === "active" ? t("accountSourceActive")
+                        : t("accountSourceManaged")
+                    }</span>
+                    {account.status === "reauthorizationRequired" && <span className="account-badge" role="status">{t("quotaReauthorization")}</span>}
+                    {account.status === "credentialDeleted" && <span className="account-badge" role="status">{t("credentialDeleted")}</span>}
+                    {isActive && <span className="account-badge">{t("accountActive")}</span>}
+                    {accountQuota?.snapshot && accountQuota.snapshot.windows.length > 0 && (
+                      <span className="account-detail">
+                        {accountQuota.snapshot.windows.map((window) => `${window.name}: ${window.remainingPercent}%`).join(" · ")}
+                      </span>
+                    )}
+                  </div>
+                  <div className="account-actions">
+                    {account.isManaged && <button type="button" className="secondary-button" onClick={async () => {
+                      const next = window.prompt(t("renameAliasPrompt"), account.displayName);
+                      if (!next) return;
+                      try {
+                        await monitorApi.setAccountAlias(account.accountKey, next);
+                        setDiscoveredAccounts(await monitorApi.discoverAccounts());
+                      } catch (error) {
+                        setRequestError(errorMessage(error));
+                      }
+                    }}>{t("renameAlias")}</button>}
+                    <button type="button" onClick={async () => {
+                      setSwitchingAccount(account.accountKey);
+                      try {
+                        await monitorApi.activateAccount(account.accountKey);
+                        if (account.isManaged) {
+                          await monitorApi.refreshAccount(account.accountKey);
+                        } else {
+                          await refreshQuota();
+                        }
+                        setAccountQuotas(await monitorApi.getAllQuotas());
+                      } catch (error) {
+                        setRequestError(errorMessage(error));
+                      } finally {
+                        setSwitchingAccount(null);
+                      }
+                    }} disabled={switchingAccount === account.accountKey}>
+                      {switchingAccount === account.accountKey ? t("quotaLoading") : t("accountRefresh")}
+                    </button>
+                    {account.isManaged && <button type="button" className="secondary-button" onClick={async () => {
+                      const deleteHistory = window.confirm(t("deleteCredentialsAndHistoryConfirm"));
+                      if (!deleteHistory && !window.confirm(t("deleteCredentialsOnlyConfirm"))) return;
+                      setDeletingAccount(account.accountKey);
+                      try {
+                        await monitorApi.removeAccount(account.accountKey, deleteHistory);
+                        setDiscoveredAccounts(await monitorApi.discoverAccounts());
+                        setAccountQuotas(await monitorApi.getAllQuotas());
+                      } catch (error) {
+                        setRequestError(errorMessage(error));
+                      } finally {
+                        setDeletingAccount(null);
+                      }
+                    }} disabled={deletingAccount === account.accountKey}>
+                      {deletingAccount === account.accountKey ? t("quotaLoading") : t("removeAccount")}
+                    </button>}
+                  </div>
+                </li>;
+              })}
+            </ul>}
+            <button type="button" onClick={() => setAccountManagerOpen(false)} autoFocus>{t("understood")}</button>
           </section>
         </div>}
 

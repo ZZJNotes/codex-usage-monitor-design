@@ -17,21 +17,37 @@ use crate::quota::{
     QuotaAccount, QuotaFailureKind, QuotaRefreshError, QuotaSnapshot, QuotaSource, QuotaWindow,
 };
 
-pub struct CodexAppServerSource {
-    executable: PathBuf,
+/// A reusable client that communicates with the Codex app-server via JSON-RPC over stdio.
+///
+/// This is the core communication primitive used by both `CodexAppServerSource`
+/// (default system auth) and `TokenAppServerSource` (per-account stored tokens).
+pub(crate) struct AppServerClient {
+    codex_binary: PathBuf,
+    codx_home: Option<PathBuf>,
 }
 
-impl CodexAppServerSource {
-    pub fn discover() -> Result<Self, String> {
-        resolve_codex_executable()
-            .map(|executable| Self { executable })
-            .ok_or_else(|| "Codex CLI is unavailable".to_string())
+impl AppServerClient {
+    /// Create a new client for the given codex binary.
+    ///
+    /// When `codx_home` is `Some`, the subprocess gets `CODEX_HOME` set to that
+    /// directory (used for per-token auth). When `None`, the system default auth
+    /// is used (the current `~/.codex/` session).
+    pub(crate) fn new(codex_binary: PathBuf, codx_home: Option<PathBuf>) -> Self {
+        Self {
+            codex_binary,
+            codx_home,
+        }
     }
 
-    fn request(&self) -> Result<AppServerQuotaResponse, String> {
-        let mut command = Command::new(&self.executable);
+    /// Run the full app-server protocol: initialize → account/read → rateLimits/read.
+    ///
+    /// Returns the parsed account and rate-limit response, or an error string.
+    pub(crate) fn fetch_quota(&self) -> Result<AppServerQuotaResponse, String> {
+        let mut command = Command::new(&self.codex_binary);
         command.args(["app-server", "--stdio"]);
-        if let Some(directory) = self.executable.parent() {
+
+        // Include the codex binary's parent directory in PATH
+        if let Some(directory) = self.codex_binary.parent() {
             let mut paths = vec![directory.to_path_buf()];
             if let Some(existing) = std::env::var_os("PATH") {
                 paths.extend(std::env::split_paths(&existing));
@@ -40,12 +56,19 @@ impl CodexAppServerSource {
                 command.env("PATH", path);
             }
         }
+
+        // Set CODEX_HOME for per-account token auth
+        if let Some(ref home) = self.codx_home {
+            command.env("CODEX_HOME", home);
+        }
+
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Could not start Codex app-server: {error}"))?;
+
         let mut stdin = child
             .stdin
             .take()
@@ -54,7 +77,7 @@ impl CodexAppServerSource {
             .stdout
             .take()
             .ok_or_else(|| "Could not connect to Codex app-server output".to_string())?;
-        let mut stderr = child.stderr.take();
+
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -89,6 +112,7 @@ impl CodexAppServerSource {
                 &mut stdin,
                 serde_json::json!({ "id": 3, "method": "account/rateLimits/read" }),
             )?;
+
             let mut account = None;
             let mut rate_limits = None;
             while account.is_none() || rate_limits.is_none() {
@@ -108,32 +132,110 @@ impl CodexAppServerSource {
                 rate_limits: rate_limits.unwrap(),
             })
         })();
+
         drop(stdin);
         let _ = child.kill();
         let _ = child.wait();
-        let mut stderr_text = String::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_string(&mut stderr_text);
-        }
+
         match result {
-            Err(message) if !stderr_text.trim().is_empty() => {
-                Err(format!("{message}: {}", stderr_text.trim()))
+            Err(message) => {
+                let mut stderr_text = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut stderr_text);
+                }
+                if !stderr_text.trim().is_empty() {
+                    Err(format!("{message}: {}", stderr_text.trim()))
+                } else {
+                    Err(message)
+                }
             }
             result => result,
         }
     }
 }
 
+// ============================================================================
+// CodexAppServerSource — uses the system default auth (~/.codex/)
+// ============================================================================
+
+pub struct CodexAppServerSource {
+    executable: PathBuf,
+}
+
+impl CodexAppServerSource {
+    pub fn discover() -> Result<Self, String> {
+        resolve_codex_executable()
+            .map(|executable| Self { executable })
+            .ok_or_else(|| "Codex CLI is unavailable".to_string())
+    }
+}
+
 impl QuotaSource for CodexAppServerSource {
     fn refresh(&self) -> Result<QuotaSnapshot, QuotaRefreshError> {
-        let response = self.request().map_err(classify_app_server_error)?;
+        let client = AppServerClient::new(self.executable.clone(), None);
+        let response = client.fetch_quota().map_err(classify_app_server_error)?;
         normalize_response(response, Utc::now())
             .map_err(QuotaNormalizationError::into_refresh_error)
     }
 }
 
+// ============================================================================
+// Response types matching the Codex app-server JSON-RPC protocol
+// ============================================================================
+
+pub(crate) struct AppServerQuotaResponse {
+    pub(crate) account: GetAccountResponse,
+    pub(crate) rate_limits: GetAccountRateLimitsResponse,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GetAccountResponse {
+    pub(crate) account: Option<Account>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum Account {
+    Chatgpt {
+        email: Option<String>,
+        #[serde(rename = "planType")]
+        plan_type: String,
+    },
+    #[serde(other)]
+    Unsupported,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GetAccountRateLimitsResponse {
+    pub(crate) rate_limits: RateLimitSnapshot,
+    pub(crate) rate_limits_by_limit_id: Option<BTreeMap<String, RateLimitSnapshot>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitSnapshot {
+    pub(crate) limit_id: Option<String>,
+    pub(crate) limit_name: Option<String>,
+    #[serde(flatten)]
+    pub(crate) fields: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitWindow {
+    used_percent: i64,
+    resets_at: Option<i64>,
+    window_duration_mins: Option<u64>,
+}
+
+// ============================================================================
+// Response normalization — maps app-server JSON to QuotaSnapshot
+// ============================================================================
+
 #[derive(Debug)]
-enum QuotaNormalizationError {
+pub(crate) enum QuotaNormalizationError {
     Authentication(String),
     InvalidResponse(String),
 }
@@ -143,7 +245,7 @@ impl QuotaNormalizationError {
         Self::InvalidResponse(message.into())
     }
 
-    fn into_refresh_error(self) -> QuotaRefreshError {
+    pub(crate) fn into_refresh_error(self) -> QuotaRefreshError {
         match self {
             Self::Authentication(message) => {
                 QuotaRefreshError::new(QuotaFailureKind::Authentication, message)
@@ -162,54 +264,26 @@ impl QuotaNormalizationError {
     }
 }
 
-struct AppServerQuotaResponse {
-    account: GetAccountResponse,
-    rate_limits: GetAccountRateLimitsResponse,
+#[cfg(test)]
+pub(crate) fn normalize_responses(
+    account: &Value,
+    rate_limits: &Value,
+    observed_at: DateTime<Utc>,
+) -> Result<QuotaSnapshot, QuotaNormalizationError> {
+    let account: GetAccountResponse = serde_json::from_value(account.clone())
+        .map_err(|error| QuotaNormalizationError::invalid(error.to_string()))?;
+    let rate_limits: GetAccountRateLimitsResponse = serde_json::from_value(rate_limits.clone())
+        .map_err(|error| QuotaNormalizationError::invalid(error.to_string()))?;
+    normalize_response(
+        AppServerQuotaResponse {
+            account,
+            rate_limits,
+        },
+        observed_at,
+    )
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GetAccountResponse {
-    account: Option<Account>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum Account {
-    Chatgpt {
-        email: Option<String>,
-        #[serde(rename = "planType")]
-        plan_type: String,
-    },
-    #[serde(other)]
-    Unsupported,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GetAccountRateLimitsResponse {
-    rate_limits: RateLimitSnapshot,
-    rate_limits_by_limit_id: Option<BTreeMap<String, RateLimitSnapshot>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RateLimitSnapshot {
-    limit_id: Option<String>,
-    limit_name: Option<String>,
-    #[serde(flatten)]
-    fields: BTreeMap<String, Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RateLimitWindow {
-    used_percent: i64,
-    resets_at: Option<i64>,
-    window_duration_mins: Option<u64>,
-}
-
-fn normalize_response(
+pub(crate) fn normalize_response(
     response: AppServerQuotaResponse,
     observed_at: DateTime<Utc>,
 ) -> Result<QuotaSnapshot, QuotaNormalizationError> {
@@ -328,22 +402,9 @@ fn classify_app_server_error(message: String) -> QuotaRefreshError {
     QuotaRefreshError::new(kind, message)
 }
 
-#[cfg(test)]
-pub(crate) fn normalize_responses(
-    account: &Value,
-    rate_limits: &Value,
-    observed_at: DateTime<Utc>,
-) -> Result<QuotaSnapshot, String> {
-    normalize_response(
-        AppServerQuotaResponse {
-            account: serde_json::from_value(account.clone()).map_err(|error| error.to_string())?,
-            rate_limits: serde_json::from_value(rate_limits.clone())
-                .map_err(|error| error.to_string())?,
-        },
-        observed_at,
-    )
-    .map_err(QuotaNormalizationError::message)
-}
+// ============================================================================
+// Helper functions
+// ============================================================================
 
 fn send_request(stdin: &mut impl Write, request: Value) -> Result<(), String> {
     writeln!(stdin, "{request}").map_err(|error| error.to_string())?;
@@ -377,7 +438,8 @@ fn result_value<T: DeserializeOwned>(message: Value) -> Result<T, String> {
         .map_err(|error| format!("Codex app-server response did not match its schema: {error}"))
 }
 
-fn resolve_codex_executable() -> Option<PathBuf> {
+/// Resolve the `codex` executable path from environment and known locations.
+pub(crate) fn resolve_codex_executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CODEX_USAGE_MONITOR_CODEX_PATH") {
         let path = PathBuf::from(path);
         if is_executable_file(&path) {

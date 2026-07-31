@@ -1,11 +1,14 @@
 mod commands;
+pub mod credentials;
 pub mod database;
 pub mod governance;
 pub mod lifecycle;
 pub mod notification;
+pub mod oauth;
 pub mod platform_metrics;
 pub mod quota;
 mod quota_app_server;
+mod quota_token;
 pub mod system_health;
 pub mod token_usage;
 mod tray;
@@ -22,14 +25,16 @@ use std::{
 use chrono::{DateTime, Utc};
 use commands::NotificationIpcState;
 use commands::{
-    cleanup_expired_history, clear_history, delete_account_history, export_statistics,
-    get_application_status, get_credential_deletion_status, get_lifecycle_preferences,
-    get_notification_status, get_quota_state, get_system_health, get_system_health_history,
-    get_token_usage, quit_app, reassign_token_session, recover_quota, refresh_quota,
-    refresh_system_health, refresh_token_usage, request_credential_deletion, set_dock_visibility,
-    set_launch_at_login, set_locale, set_menu_bar_preferences, set_monitoring_paused,
-    set_notification_preferences, set_retention_days, set_theme, show_dashboard,
-    sync_dock_visibility, sync_launch_at_login,
+    activate_account, cleanup_expired_history, clear_history, delete_account_history,
+    discover_accounts, export_statistics, get_all_quotas, get_application_status,
+    get_credential_deletion_status, get_lifecycle_preferences, get_notification_status,
+    get_quota_state, get_system_health, get_system_health_history, get_token_usage, list_accounts,
+    quit_app, reassign_token_session, recover_quota, refresh_account, refresh_quota,
+    refresh_quotas, refresh_system_health, refresh_token_usage, remove_account,
+    request_credential_deletion, set_account_alias, set_dock_visibility, set_launch_at_login,
+    set_locale, set_menu_bar_preferences, set_monitoring_paused, set_notification_preferences,
+    set_retention_days, set_theme, show_dashboard, start_codex_login, sync_dock_visibility,
+    sync_launch_at_login,
 };
 use database::Database;
 use governance::DataGovernanceService;
@@ -39,6 +44,7 @@ use platform_metrics::MacMetricSource;
 use quota::{CURRENT_CODEX_ACCOUNT_ID, QuotaRefreshCoordinator, QuotaService};
 use quota_app_server::CodexAppServerSource;
 use serde::Serialize;
+use std::sync::Mutex;
 use system_health::{SystemHealthService, SystemHealthState};
 use tauri::{AppHandle, Manager, Runtime, WindowEvent};
 use token_usage::{AccountEvidenceSource, ActiveAccountEvidence, TokenAccount, TokenUsageService};
@@ -52,6 +58,8 @@ pub(crate) struct AppState {
     pub(crate) governance: Arc<DataGovernanceService>,
     pub(crate) notifications: Arc<NotificationService>,
     pub(crate) application_status: Arc<RwLock<ApplicationStatus>>,
+    pub(crate) credentials: Arc<credentials::CredentialService>,
+    pub(crate) quota_refresh: Arc<Mutex<QuotaRefreshCoordinator>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,6 +268,15 @@ pub fn run() {
             export_statistics,
             get_credential_deletion_status,
             request_credential_deletion,
+            discover_accounts,
+            list_accounts,
+            activate_account,
+            start_codex_login,
+            get_all_quotas,
+            refresh_account,
+            refresh_quotas,
+            remove_account,
+            set_account_alias,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -307,6 +324,35 @@ pub fn run() {
             if !lifecycle.preferences().monitoring_paused {
                 quota.refresh_account_evidence();
             }
+            let quota_refresh = Arc::new(Mutex::new(QuotaRefreshCoordinator::new(vec![
+                quota.clone(),
+            ])));
+            let credentials =
+                Arc::new(credentials::CredentialService::production(database.clone()));
+            let _ = credentials.reconcile_on_startup();
+            // Register persisted managed accounts with independent DirectHttpsQuotaSource.
+            if let Ok(managed) = credentials.list_managed() {
+                let mut coordinator = quota_refresh.lock().expect("quota refresh lock poisoned");
+                for account in managed {
+                    if matches!(
+                        account.status,
+                        credentials::ManagedAccountStatus::Active
+                            | credentials::ManagedAccountStatus::ReauthorizationRequired
+                    ) {
+                        let source = Arc::new(quota_token::DirectHttpsQuotaSource::new(
+                            account.account_id.clone(),
+                            account.identity_fingerprint.clone(),
+                            account.alias.clone(),
+                            credentials.clone(),
+                        ));
+                        coordinator.add_account(Arc::new(QuotaService::with_store(
+                            account.account_id.clone(),
+                            source,
+                            Arc::new(database.clone()),
+                        )));
+                    }
+                }
+            }
             let token_usage = Arc::new(TokenUsageService::with_account_evidence(
                 database.clone(),
                 token_usage::default_roots(),
@@ -321,6 +367,8 @@ pub fn run() {
                 governance: governance.clone(),
                 notifications: notifications.clone(),
                 application_status: application_status.clone(),
+                credentials: credentials.clone(),
+                quota_refresh: quota_refresh.clone(),
             });
             app.manage(NotificationIpcState {
                 lifecycle: lifecycle.clone(),
@@ -331,9 +379,11 @@ pub fn run() {
                 .map_err(std::io::Error::other)?;
             app.manage(setup_tray(app.handle())?);
             let tray_app = app.handle().clone();
-            thread::spawn(move || loop {
-                thread::sleep(Duration::from_secs(1));
-                update_tray_title(&tray_app);
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    update_tray_title(&tray_app);
+                }
             });
 
             sync_dock_visibility(app.handle(), preferences.show_in_dock)

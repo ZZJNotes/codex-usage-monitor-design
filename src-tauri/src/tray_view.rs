@@ -199,7 +199,10 @@ fn parameter_compact(
 ) -> Option<String> {
     match parameter {
         MenuBarParameter::Cpu => metrics.map(|m| {
-            format!("C{}%", format_number(f64::from(m.cpu_percent), 0, os_locale))
+            format!(
+                "C{}%",
+                format_number(f64::from(m.cpu_percent), 0, os_locale)
+            )
         }),
         MenuBarParameter::MemoryPressure => metrics.map(|m| {
             let percent = if m.memory_total_bytes == 0 {
